@@ -1,0 +1,33 @@
+# Keil build output
+MDK-ARM/adc_collect/
+MDK-ARM/*.lst
+MDK-ARM/*.map
+MDK-ARM/*.log
+MDK-ARM/JLinkLog.txt
+
+# Keil user/local settings
+MDK-ARM/*.uvguix.*
+MDK-ARM/*.uvgui.*
+MDK-ARM/*.uvoptx
+MDK-ARM/JLinkSettings.ini
+MDK-ARM/.vscode/*.log
+MDK-ARM/.vscode/*.lock
+
+# Generic build artifacts
+*.o
+*.d
+*.crf
+*.axf
+*.hex
+*.bin
+*.elf
+*.map
+*.lst
+*.htm
+*.dep
+*.lnp
+
+# Editor/system files
+.vscode/
+.DS_Store
+Thumbs.db
