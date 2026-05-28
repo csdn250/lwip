@@ -35,6 +35,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "app_log.h"
+#include "adc_acq_service.h"
+#include "dac_tpc112s4.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -122,27 +124,42 @@ int main(void)
   app_log_key_event(APP_LOG_EVENT_PERIPHERALS_READY,
                     "peripherals init done");
 
+  adc_acq_service_init();
+  adc_acq_service_start();
+
   while (1)
   {
 
     MX_LWIP_Process();
 
-    static uint8_t lwip_ready_logged = 0U;
-    char msg[96];
+    
+    
 
-    if ((0U == lwip_ready_logged) &&
-        (netif_is_link_up(&gnetif)) &&
-        (netif_is_up(&gnetif)))
-    {
-      lwip_ready_logged = 1U;
+    // static uint8_t lwip_ready_logged = 0U;
+    // char msg[96];
 
-      snprintf(msg,
-               sizeof(msg),
-               "lwip ready ip=%s",
-               ip4addr_ntoa(netif_ip4_addr(&gnetif)));
+    // if ((0U == lwip_ready_logged) &&
+    //     (netif_is_link_up(&gnetif)) &&
+    //     (netif_is_up(&gnetif)))
+    // {
+    //   lwip_ready_logged = 1U;
 
-      app_log_key_event(APP_LOG_EVENT_LWIP_READY, msg);
-    }
+    //   snprintf(msg,
+    //            sizeof(msg),
+    //            "lwip ready ip=%s",
+    //            ip4addr_ntoa(netif_ip4_addr(&gnetif)));
+
+    //   app_log_key_event(APP_LOG_EVENT_LWIP_READY, msg);
+    // }
+
+    // static uint32_t last_dac_test_tick = 0U;
+    // if ((HAL_GetTick() - last_dac_test_tick) >= 1000U)
+    // {
+    //   last_dac_test_tick = HAL_GetTick();
+    //   dac_tpc112s4_test_pattern();
+    // }
+    dac_tpc112s4_test_pattern();
+    // HAL_Delay(100);
   }
 }
 
