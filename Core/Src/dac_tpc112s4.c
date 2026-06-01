@@ -12,7 +12,7 @@
 #define DAC_LOAD_LOW() (DAC_LOAD_GPIO_Port->BSRR = ((uint32_t)DAC_LOAD_Pin << 16U))
 #define DAC_LOAD_HIGH() (DAC_LOAD_GPIO_Port->BSRR = (uint32_t)DAC_LOAD_Pin)
 
-#define DAC_TIMING_DELAY_CYCLES 200U
+#define DAC_TIMING_DELAY_CYCLES 4U
 
 static uint16_t dac_tpc112s4_make_frame(uint8_t channel,
                                         uint16_t code)

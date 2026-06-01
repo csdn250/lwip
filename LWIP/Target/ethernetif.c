@@ -29,6 +29,8 @@
 #include "lwip/ethip6.h"
 #include "ethernetif.h"
 #include "lan8742.h"
+#include "SEGGER_RTT.h"
+#include <stdio.h>
 #include <string.h>
 
 /* Within 'USER CODE' section, code will be kept by default at each generation */
@@ -49,6 +51,59 @@
 
 /* USER CODE BEGIN 1 */
 #define CACHE_LINE_SIZE 32U
+#define ETH_DEBUG_RTT 0U
+
+static volatile uint32_t eth_dbg_rx_link_count;
+static volatile uint32_t eth_dbg_rx_stack_count;
+static volatile uint32_t eth_dbg_rx_input_ok_count;
+static volatile uint32_t eth_dbg_rx_input_err_count;
+static volatile uint32_t eth_dbg_tx_count;
+static volatile uint32_t eth_dbg_tx_ok_count;
+static volatile uint32_t eth_dbg_tx_err_count;
+static volatile uint16_t eth_dbg_last_rx_len;
+static volatile uint16_t eth_dbg_last_tx_len;
+static volatile uint16_t eth_dbg_last_rx_type;
+static volatile uint16_t eth_dbg_last_tx_type;
+static volatile uint32_t eth_dbg_last_print_tick;
+
+static uint16_t ethernetif_get_eth_type(const uint8_t *payload, uint16_t length)
+{
+  if ((payload == NULL) || (length < 14U))
+  {
+    return 0U;
+  }
+
+  return (uint16_t)(((uint16_t)payload[12] << 8) | payload[13]);
+}
+
+static void ethernetif_debug_poll(void)
+{
+  uint32_t now = HAL_GetTick();
+
+  if ((now - eth_dbg_last_print_tick) >= 10000U)
+  {
+    char msg[160];
+
+    eth_dbg_last_print_tick = now;
+    snprintf(msg,
+             sizeof(msg),
+             "eth dbg rx_link=%lu rx_stack=%lu rx_ok=%lu rx_err=%lu tx=%lu tx_ok=%lu tx_err=%lu last_rx=%u/0x%04X last_tx=%u/0x%04X\r\n",
+             (unsigned long)eth_dbg_rx_link_count,
+             (unsigned long)eth_dbg_rx_stack_count,
+             (unsigned long)eth_dbg_rx_input_ok_count,
+             (unsigned long)eth_dbg_rx_input_err_count,
+             (unsigned long)eth_dbg_tx_count,
+             (unsigned long)eth_dbg_tx_ok_count,
+             (unsigned long)eth_dbg_tx_err_count,
+             (unsigned int)eth_dbg_last_rx_len,
+             (unsigned int)eth_dbg_last_rx_type,
+             (unsigned int)eth_dbg_last_tx_len,
+             (unsigned int)eth_dbg_last_tx_type);
+#if ETH_DEBUG_RTT
+    SEGGER_RTT_WriteString(0, msg);
+#endif
+  }
+}
 
 static void ethernetif_clean_dcache_by_addr(uint32_t address, uint32_t length)
 {
@@ -112,7 +167,7 @@ typedef struct
 } RxBuff_t;
 
 /* Memory Pool Declaration */
-#define ETH_RX_BUFFER_CNT             12U
+#define ETH_RX_BUFFER_CNT             16U
 LWIP_MEMPOOL_DECLARE(RX_POOL, ETH_RX_BUFFER_CNT, sizeof(RxBuff_t), "Zero-copy RX PBUF pool");
 
 /* Variable Definitions */
@@ -204,6 +259,7 @@ static void low_level_init(struct netif *netif)
   /* USER CODE END MACADDRESS */
 
   hal_eth_init_status = HAL_ETH_Init(&heth);
+  ETH->MACPFR |= ETH_MACPFR_PM;
 
   memset(&TxConfig, 0 , sizeof(ETH_TxPacketConfig));
   TxConfig.Attributes = ETH_TX_PACKETS_FEATURES_CSUM | ETH_TX_PACKETS_FEATURES_CRCPAD;
@@ -283,9 +339,14 @@ static void low_level_init(struct netif *netif)
 static err_t low_level_output(struct netif *netif, struct pbuf *p)
 {
   uint32_t i = 0U;
+  HAL_StatusTypeDef hal_status;
   struct pbuf *q = NULL;
   err_t errval = ERR_OK;
   ETH_BufferTypeDef Txbuffer[ETH_TX_DESC_CNT] = {0};
+
+  eth_dbg_tx_count++;
+  eth_dbg_last_tx_len = p->tot_len;
+  eth_dbg_last_tx_type = ethernetif_get_eth_type((const uint8_t *)p->payload, p->len);
 
   memset(Txbuffer, 0 , ETH_TX_DESC_CNT*sizeof(ETH_BufferTypeDef));
 
@@ -316,7 +377,17 @@ static err_t low_level_output(struct netif *netif, struct pbuf *p)
   TxConfig.TxBuffer = Txbuffer;
   TxConfig.pData = p;
 
-  HAL_ETH_Transmit(&heth, &TxConfig, ETH_DMA_TRANSMIT_TIMEOUT);
+  hal_status = HAL_ETH_Transmit(&heth, &TxConfig, ETH_DMA_TRANSMIT_TIMEOUT);
+  if (hal_status == HAL_OK)
+  {
+    eth_dbg_tx_ok_count++;
+  }
+  else
+  {
+    eth_dbg_tx_err_count++;
+  }
+
+  ethernetif_debug_poll();
 
   return errval;
 }
@@ -336,6 +407,10 @@ static struct pbuf * low_level_input(struct netif *netif)
   if(RxAllocStatus == RX_ALLOC_OK)
   {
     HAL_ETH_ReadData(&heth, (void **)&p);
+    if (p != NULL)
+    {
+      eth_dbg_rx_stack_count++;
+    }
   }
 
   return p;
@@ -361,10 +436,17 @@ void ethernetif_input(struct netif *netif)
     {
       if (netif->input( p, netif) != ERR_OK )
       {
+        eth_dbg_rx_input_err_count++;
         pbuf_free(p);
+      }
+      else
+      {
+        eth_dbg_rx_input_ok_count++;
       }
     }
   } while(p!=NULL);
+
+  ethernetif_debug_poll();
 }
 
 #if !LWIP_ARP
@@ -792,6 +874,10 @@ void HAL_ETH_RxLinkCallback(void **pStart, void **pEnd, uint8_t *buff, uint16_t 
 
   /* Invalidate data cache because Rx DMA's writing to physical memory makes it stale. */
   ethernetif_invalidate_dcache_by_addr((uint32_t)buff, Length);
+
+  eth_dbg_rx_link_count++;
+  eth_dbg_last_rx_len = Length;
+  eth_dbg_last_rx_type = ethernetif_get_eth_type(buff, Length);
 
 /* USER CODE END HAL ETH RxLinkCallback */
 }

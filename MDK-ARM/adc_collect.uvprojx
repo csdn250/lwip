@@ -561,6 +561,16 @@
               <FileType>1</FileType>
               <FilePath>..\Core\Src\dac_tpc112s4.c</FilePath>
             </File>
+            <File>
+              <FileName>adc_frame_builder.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\adc_frame_builder.c</FilePath>
+            </File>
+            <File>
+              <FileName>adc_tcp_server.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\adc_tcp_server.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

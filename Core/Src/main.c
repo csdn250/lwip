@@ -37,6 +37,9 @@
 #include "app_log.h"
 #include "adc_acq_service.h"
 #include "dac_tpc112s4.h"
+#include "adc_frame_builder.h"
+#include "adc_tcp_server.h"
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -124,17 +127,82 @@ int main(void)
   app_log_key_event(APP_LOG_EVENT_PERIPHERALS_READY,
                     "peripherals init done");
 
-  adc_acq_service_init();
-  adc_acq_service_start();
+
+  adc_tcp_server_init();
+
+
+  // adc_acq_service_init();
+  // adc_acq_service_start();
 
   while (1)
   {
 
     MX_LWIP_Process();
 
-    
-    
+    adc_tcp_server_process();
 
+    // static uint32_t last_alive_tick = 0U;
+
+    // if ((HAL_GetTick() - last_alive_tick) >= 1000U)
+    // {
+    //   last_alive_tick = HAL_GetTick();
+    //   SEGGER_RTT_WriteString(0, "main alive\r\n");
+    // }
+
+    // static uint32_t last_net_tick = 0U;
+
+    // if ((HAL_GetTick() - last_net_tick) >= 1000U)
+    // {
+    //   char msg[96];
+
+    //   last_net_tick = HAL_GetTick();
+
+    //   snprintf(msg,
+    //            sizeof(msg),
+    //            "net ip=%s link=%u up=%u\r\n",
+    //            ip4addr_ntoa(netif_ip4_addr(&gnetif)),
+    //            netif_is_link_up(&gnetif),
+    //            netif_is_up(&gnetif));
+
+    //   SEGGER_RTT_WriteString(0, msg);
+    // }
+    // static uint32_t last_adc_frame_tick = 0U;
+    // static adc_acq_sample_t adc_sample;
+    // static uint8_t adc_frame_buf[ADC_FRAME_MAX_BYTES];
+
+    // if ((HAL_GetTick() - last_adc_frame_tick) >= 1000U)
+    // {
+    //   uint16_t frame_len;
+    //   adc_frame_header_t *header;
+
+    //   last_adc_frame_tick = HAL_GetTick();
+
+    //   if (0U != adc_acq_service_get_sample(&adc_sample))
+    //   {
+    //     frame_len = adc_frame_builder_build_raw_float(&adc_sample,
+    //                                                   0x0FFFU,
+    //                                                   adc_frame_buf,
+    //                                                   sizeof(adc_frame_buf));
+
+    //     if (0U != frame_len)
+    //     {
+    //       char msg[128];
+
+    //       header = (adc_frame_header_t *)adc_frame_buf;
+
+    //       snprintf(msg,
+    //                sizeof(msg),
+    //                "frame len=%u magic=0x%08lX count=%u payload=%u seq=%lu\r\n",
+    //                frame_len,
+    //                (unsigned long)header->magic,
+    //                header->channel_count,
+    //                header->payload_bytes,
+    //                (unsigned long)header->seq);
+
+    //       SEGGER_RTT_WriteString(0, msg);
+    //     }
+    //   }
+    // }
     // static uint8_t lwip_ready_logged = 0U;
     // char msg[96];
 
@@ -158,7 +226,9 @@ int main(void)
     //   last_dac_test_tick = HAL_GetTick();
     //   dac_tpc112s4_test_pattern();
     // }
-    dac_tpc112s4_test_pattern();
+
+    // dac_tpc112s4_test_pattern();
+
     // HAL_Delay(100);
   }
 }

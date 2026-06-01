@@ -1,0 +1,15 @@
+#ifndef __ADC_TCP_SERVER_H
+#define __ADC_TCP_SERVER_H
+
+#include "main.h"
+
+/* TCP server public API */
+void adc_tcp_server_init(void);
+void adc_tcp_server_process(void);
+uint8_t adc_tcp_server_has_client(void);
+
+
+
+
+#endif /* __ADC_TCP_SERVER_H */
+
