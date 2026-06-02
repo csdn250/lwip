@@ -39,6 +39,9 @@
 #include "dac_tpc112s4.h"
 #include "adc_frame_builder.h"
 #include "adc_tcp_server.h"
+#include "eeprom_storage.h"
+#include "device_config.h"
+#include "udp_discovery.h"
 
 /* USER CODE END Includes */
 
@@ -112,6 +115,9 @@ int main(void)
                     "logger started");
 
   /* Initialize all configured peripherals */
+
+  device_config_init_defaults();
+
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_ADC1_Init();
@@ -120,6 +126,7 @@ int main(void)
   MX_SPI1_Init();
   MX_TIM6_Init();
   MX_I2C2_Init();
+  eeprom_storage_init();
   MX_USART2_UART_Init();
 
   MX_LWIP_Init();
@@ -127,9 +134,8 @@ int main(void)
   app_log_key_event(APP_LOG_EVENT_PERIPHERALS_READY,
                     "peripherals init done");
 
-
   adc_tcp_server_init();
-
+  udp_discovery_init();
 
   // adc_acq_service_init();
   // adc_acq_service_start();
@@ -140,6 +146,7 @@ int main(void)
     MX_LWIP_Process();
 
     adc_tcp_server_process();
+    udp_discovery_process();
 
     // static uint32_t last_alive_tick = 0U;
 

@@ -571,6 +571,21 @@
               <FileType>1</FileType>
               <FilePath>..\Core\Src\adc_tcp_server.c</FilePath>
             </File>
+            <File>
+              <FileName>eeprom_storage.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\eeprom_storage.c</FilePath>
+            </File>
+            <File>
+              <FileName>device_config.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\device_config.c</FilePath>
+            </File>
+            <File>
+              <FileName>udp_discovery.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\udp_discovery.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

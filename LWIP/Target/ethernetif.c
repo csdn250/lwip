@@ -33,6 +33,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "device_config.h"
+
 /* Within 'USER CODE' section, code will be kept by default at each generation */
 /* USER CODE BEGIN 0 */
 
@@ -238,16 +240,20 @@ void pbuf_free_custom(struct pbuf *p);
 static void low_level_init(struct netif *netif)
 {
   HAL_StatusTypeDef hal_eth_init_status = HAL_OK;
+  
+  const device_network_config_t *net_cfg;
+  net_cfg=device_config_get_network();
+
   /* Start ETH HAL Init */
 
    uint8_t MACAddr[6] ;
   heth.Instance = ETH;
-  MACAddr[0] = 0x00;
-  MACAddr[1] = 0x80;
-  MACAddr[2] = 0xE1;
-  MACAddr[3] = 0x00;
-  MACAddr[4] = 0x00;
-  MACAddr[5] = 0x00;
+  MACAddr[0] = net_cfg->mac[0];
+  MACAddr[1] = net_cfg->mac[1];
+  MACAddr[2] = net_cfg->mac[2];
+  MACAddr[3] = net_cfg->mac[3];
+  MACAddr[4] = net_cfg->mac[4];
+  MACAddr[5] = net_cfg->mac[5];
   heth.Init.MACAddr = &MACAddr[0];
   heth.Init.MediaInterface = HAL_ETH_RMII_MODE;
   heth.Init.TxDesc = DMATxDscrTab;
