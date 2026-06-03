@@ -7,9 +7,6 @@
 void adc_tcp_server_init(void);
 void adc_tcp_server_process(void);
 uint8_t adc_tcp_server_has_client(void);
-
-
-
+uint8_t adc_tcp_server_is_network_config_dirty(void);
 
 #endif /* __ADC_TCP_SERVER_H */
-

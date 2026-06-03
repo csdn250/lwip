@@ -26,95 +26,33 @@
 #include "tim.h"
 #include "usart.h"
 #include "gpio.h"
+#include "SEGGER_RTT.h"
 
-#include <stdio.h>
-#include "lwip.h"
-#include "lwip/netif.h"
-#include "lwip/ip4_addr.h"
-
-/* Private includes ----------------------------------------------------------*/
-/* USER CODE BEGIN Includes */
 #include "app_log.h"
 #include "adc_acq_service.h"
-#include "dac_tpc112s4.h"
-#include "adc_frame_builder.h"
 #include "adc_tcp_server.h"
 #include "eeprom_storage.h"
 #include "device_config.h"
 #include "udp_discovery.h"
 
-/* USER CODE END Includes */
-
-/* Private typedef -----------------------------------------------------------*/
-/* USER CODE BEGIN PTD */
-
-/* USER CODE END PTD */
-
-/* Private define ------------------------------------------------------------*/
-/* USER CODE BEGIN PD */
-
-/* USER CODE END PD */
-
-/* Private macro -------------------------------------------------------------*/
-/* USER CODE BEGIN PM */
-
-/* USER CODE END PM */
-
-/* Private variables ---------------------------------------------------------*/
-
-/* USER CODE BEGIN PV */
-extern struct netif gnetif;
-
-/* USER CODE END PV */
-
-/* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 void PeriphCommonClock_Config(void);
 static void MPU_Config(void);
-/* USER CODE BEGIN PFP */
 
-/* USER CODE END PFP */
-
-/* Private user code ---------------------------------------------------------*/
-/* USER CODE BEGIN 0 */
-
-/* USER CODE END 0 */
-
-/**
- * @brief  The application entry point.
- * @retval int
- */
 int main(void)
 {
-  /* USER CODE BEGIN 1 */
 
-  /* USER CODE END 1 */
-
-  /* MPU Configuration--------------------------------------------------------*/
   MPU_Config();
-
-  /* Enable I-Cache---------------------------------------------------------*/
   SCB_EnableICache();
-
-  /* Enable D-Cache---------------------------------------------------------*/
   SCB_EnableDCache();
 
-  /* MCU Configuration--------------------------------------------------------*/
-
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
-
-  /* Configure the system clock */
   SystemClock_Config();
-
-  /* Configure the peripherals common clocks */
   PeriphCommonClock_Config();
 
   app_log_init();
   app_log_key_event(APP_LOG_EVENT_LOGGER_STARTED,
                     "logger started");
-
-  /* Initialize all configured peripherals */
 
   device_config_init_defaults();
 
@@ -127,6 +65,15 @@ int main(void)
   MX_TIM6_Init();
   MX_I2C2_Init();
   eeprom_storage_init();
+  if (HAL_OK == device_config_load_network())
+  {
+    SEGGER_RTT_WriteString(0, "device config loaded\r\n");
+  }
+  else
+  {
+    SEGGER_RTT_WriteString(0, "device config default\r\n");
+  }
+
   MX_USART2_UART_Init();
 
   MX_LWIP_Init();
@@ -137,106 +84,19 @@ int main(void)
   adc_tcp_server_init();
   udp_discovery_init();
 
-  // adc_acq_service_init();
-  // adc_acq_service_start();
+  adc_acq_service_init();
+  adc_acq_service_start();
 
   while (1)
   {
-
+    /* lwIP raw API must be polled frequently in the main loop. */
     MX_LWIP_Process();
 
+    /* TCP handles command parsing and ADC data streaming. */
     adc_tcp_server_process();
+
+    /* UDP broadcasts device info only when no TCP client is connected. */
     udp_discovery_process();
-
-    // static uint32_t last_alive_tick = 0U;
-
-    // if ((HAL_GetTick() - last_alive_tick) >= 1000U)
-    // {
-    //   last_alive_tick = HAL_GetTick();
-    //   SEGGER_RTT_WriteString(0, "main alive\r\n");
-    // }
-
-    // static uint32_t last_net_tick = 0U;
-
-    // if ((HAL_GetTick() - last_net_tick) >= 1000U)
-    // {
-    //   char msg[96];
-
-    //   last_net_tick = HAL_GetTick();
-
-    //   snprintf(msg,
-    //            sizeof(msg),
-    //            "net ip=%s link=%u up=%u\r\n",
-    //            ip4addr_ntoa(netif_ip4_addr(&gnetif)),
-    //            netif_is_link_up(&gnetif),
-    //            netif_is_up(&gnetif));
-
-    //   SEGGER_RTT_WriteString(0, msg);
-    // }
-    // static uint32_t last_adc_frame_tick = 0U;
-    // static adc_acq_sample_t adc_sample;
-    // static uint8_t adc_frame_buf[ADC_FRAME_MAX_BYTES];
-
-    // if ((HAL_GetTick() - last_adc_frame_tick) >= 1000U)
-    // {
-    //   uint16_t frame_len;
-    //   adc_frame_header_t *header;
-
-    //   last_adc_frame_tick = HAL_GetTick();
-
-    //   if (0U != adc_acq_service_get_sample(&adc_sample))
-    //   {
-    //     frame_len = adc_frame_builder_build_raw_float(&adc_sample,
-    //                                                   0x0FFFU,
-    //                                                   adc_frame_buf,
-    //                                                   sizeof(adc_frame_buf));
-
-    //     if (0U != frame_len)
-    //     {
-    //       char msg[128];
-
-    //       header = (adc_frame_header_t *)adc_frame_buf;
-
-    //       snprintf(msg,
-    //                sizeof(msg),
-    //                "frame len=%u magic=0x%08lX count=%u payload=%u seq=%lu\r\n",
-    //                frame_len,
-    //                (unsigned long)header->magic,
-    //                header->channel_count,
-    //                header->payload_bytes,
-    //                (unsigned long)header->seq);
-
-    //       SEGGER_RTT_WriteString(0, msg);
-    //     }
-    //   }
-    // }
-    // static uint8_t lwip_ready_logged = 0U;
-    // char msg[96];
-
-    // if ((0U == lwip_ready_logged) &&
-    //     (netif_is_link_up(&gnetif)) &&
-    //     (netif_is_up(&gnetif)))
-    // {
-    //   lwip_ready_logged = 1U;
-
-    //   snprintf(msg,
-    //            sizeof(msg),
-    //            "lwip ready ip=%s",
-    //            ip4addr_ntoa(netif_ip4_addr(&gnetif)));
-
-    //   app_log_key_event(APP_LOG_EVENT_LWIP_READY, msg);
-    // }
-
-    // static uint32_t last_dac_test_tick = 0U;
-    // if ((HAL_GetTick() - last_dac_test_tick) >= 1000U)
-    // {
-    //   last_dac_test_tick = HAL_GetTick();
-    //   dac_tpc112s4_test_pattern();
-    // }
-
-    // dac_tpc112s4_test_pattern();
-
-    // HAL_Delay(100);
   }
 }
 

@@ -4,6 +4,8 @@
 #include "lwip/err.h"
 #include "lwip/pbuf.h"
 #include "lwip/tcp.h"
+#include "device_config.h"
+#include "adc_frame_builder.h"
 
 #include <string.h>
 
@@ -15,9 +17,9 @@
  * 4. adc_tcp_server_parse_rx() splits continuous bytes into protocol frames.
  * 5. adc_tcp_server_handle_frame() dispatches the command.
  *
- * 中文速记：
- * 监听 PCB 只负责等客户端连进来；客户端 PCB 才是真正收发数据的连接。
- * TCP 是字节流，所以 recv 每次收到的内容不一定刚好是一帧，必须用缓存切帧。
+ * The listen PCB only accepts connections.
+ * The client PCB is the real data path.
+ * TCP is a byte stream, so recv data must be buffered and framed.
  */
 
 /* ========================= Protocol Definition ========================= */
@@ -34,6 +36,12 @@
 #define ADC_PROTO_CMD_READ_PARAM 0x02U
 #define ADC_PROTO_CMD_HEARTBEAT 0x07U
 
+#define ADC_PROTO_WRITE_STATUS_OK 0x00U
+#define ADC_PROTO_WRITE_STATUS_SAVE_PENDING 0x01U
+#define ADC_PROTO_WRITE_STATUS_BAD_LEN 0x02U
+#define ADC_PROTO_WRITE_STATUS_NOT_FOUND 0x03U
+#define ADC_PROTO_WRITE_STATUS_TOO_LONG 0x04U
+
 /* 0x81/0x82 are reserved by the protocol document for ADC data stream frames. */
 #define ADC_PROTO_RSP_RAW_DATA 0x81U
 #define ADC_PROTO_RSP_CONVERTED_DATA 0x82U
@@ -46,7 +54,7 @@
 #define ADC_PROTO_FRAME_OVERHEAD (ADC_PROTO_HEADER_SIZE + ADC_PROTO_TAIL_SIZE)
 #define ADC_PROTO_MIN_FRAME_SIZE ADC_PROTO_FRAME_OVERHEAD
 
-#define ADC_TCP_RX_BUF_SIZE 512U
+#define ADC_TCP_RX_BUF_SIZE 1500U
 #define ADC_PROTO_MAX_PAYLOAD_SIZE (ADC_TCP_RX_BUF_SIZE - ADC_PROTO_FRAME_OVERHEAD)
 
 #define ADC_ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
@@ -63,6 +71,16 @@
 #define ADC_PARAM_BLOCK_DA_CH2 0x000AU
 #define ADC_PARAM_BLOCK_DA_CH3 0x000BU
 #define ADC_PARAM_BLOCK_DA_CH4 0x000CU
+
+#define ADC_CAL_PARAM_BYTES (DEVICE_CONFIG_ADC_CHANNEL_COUNT * 2U * sizeof(int32_t))
+
+#define ADC_STREAM_TYPE_RAW ADC_PROTO_RSP_RAW_DATA
+#define ADC_STREAM_TYPE_CONVERTED ADC_PROTO_RSP_CONVERTED_DATA
+
+#define ADC_STREAM_MAX_FRAMES_PER_PUMP 32U
+#define ADC_STREAM_TCP_SEND_MARGIN 32U
+
+#define ADC_PROTO_RSP_DEBUG_STATUS 0x83U
 
 typedef struct
 {
@@ -92,26 +110,76 @@ static uint8_t s_param_da_ch4[14];
 
 static adc_param_block_t s_param_table[] =
     {
-        {ADC_PARAM_BLOCK_CAL_DATA, s_param_cal_data, sizeof(s_param_cal_data), sizeof(s_param_cal_data)},
-        {ADC_PARAM_BLOCK_CONTROL, s_param_control, sizeof(s_param_control), sizeof(s_param_control)},
-        {ADC_PARAM_BLOCK_CONFIG, s_param_config, sizeof(s_param_config), sizeof(s_param_config)},
-        {ADC_PARAM_BLOCK_IP_ADDR, s_param_ip_addr, sizeof(s_param_ip_addr), sizeof(s_param_ip_addr)},
-        {ADC_PARAM_BLOCK_MAC_ADDR, s_param_mac_addr, sizeof(s_param_mac_addr), sizeof(s_param_mac_addr)},
-        {ADC_PARAM_BLOCK_PORT, s_param_port, sizeof(s_param_port), sizeof(s_param_port)},
-        {ADC_PARAM_BLOCK_NETMASK, s_param_netmask, sizeof(s_param_netmask), sizeof(s_param_netmask)},
-        {ADC_PARAM_BLOCK_GATEWAY, s_param_gateway, sizeof(s_param_gateway), sizeof(s_param_gateway)},
-        {ADC_PARAM_BLOCK_DA_CH1, s_param_da_ch1, sizeof(s_param_da_ch1), sizeof(s_param_da_ch1)},
-        {ADC_PARAM_BLOCK_DA_CH2, s_param_da_ch2, sizeof(s_param_da_ch2), sizeof(s_param_da_ch2)},
-        {ADC_PARAM_BLOCK_DA_CH3, s_param_da_ch3, sizeof(s_param_da_ch3), sizeof(s_param_da_ch3)},
-        {ADC_PARAM_BLOCK_DA_CH4, s_param_da_ch4, sizeof(s_param_da_ch4), sizeof(s_param_da_ch4)},
+        {ADC_PARAM_BLOCK_CAL_DATA,
+         s_param_cal_data,
+         ADC_CAL_PARAM_BYTES,
+         sizeof(s_param_cal_data)},
+        {ADC_PARAM_BLOCK_CONTROL,
+         s_param_control,
+         sizeof(s_param_control),
+         sizeof(s_param_control)},
+        {ADC_PARAM_BLOCK_CONFIG,
+         s_param_config,
+         sizeof(s_param_config),
+         sizeof(s_param_config)},
+        {ADC_PARAM_BLOCK_IP_ADDR,
+         s_param_ip_addr,
+         sizeof(s_param_ip_addr),
+         sizeof(s_param_ip_addr)},
+        {ADC_PARAM_BLOCK_MAC_ADDR,
+         s_param_mac_addr,
+         sizeof(s_param_mac_addr),
+         sizeof(s_param_mac_addr)},
+        {ADC_PARAM_BLOCK_PORT,
+         s_param_port,
+         sizeof(s_param_port),
+         sizeof(s_param_port)},
+        {ADC_PARAM_BLOCK_NETMASK,
+         s_param_netmask,
+         sizeof(s_param_netmask),
+         sizeof(s_param_netmask)},
+        {ADC_PARAM_BLOCK_GATEWAY,
+         s_param_gateway,
+         sizeof(s_param_gateway),
+         sizeof(s_param_gateway)},
+        {ADC_PARAM_BLOCK_DA_CH1,
+         s_param_da_ch1,
+         sizeof(s_param_da_ch1),
+         sizeof(s_param_da_ch1)},
+        {ADC_PARAM_BLOCK_DA_CH2,
+         s_param_da_ch2,
+         sizeof(s_param_da_ch2),
+         sizeof(s_param_da_ch2)},
+        {ADC_PARAM_BLOCK_DA_CH3,
+         s_param_da_ch3,
+         sizeof(s_param_da_ch3),
+         sizeof(s_param_da_ch3)},
+        {ADC_PARAM_BLOCK_DA_CH4,
+         s_param_da_ch4,
+         sizeof(s_param_da_ch4),
+         sizeof(s_param_da_ch4)},
 };
 
 /* 后续做连续采集上传时使用：1=允许周期发送 ADC 数据，0=停止。 */
 static uint8_t s_adc_stream_enabled;
 
+static uint8_t s_adc_stream_type = ADC_STREAM_TYPE_RAW;
+static uint32_t s_adc_stream_seq;
+
+static uint32_t s_debug_status_last_tick;
+static uint32_t s_tcp_send_fail_count;
+static uint16_t s_tcp_sndbuf_min;
+
 /* TCP 接收缓存：先把 pbuf 里的字节拷贝到这里，再释放 pbuf。 */
 static uint8_t s_rx_buf[ADC_TCP_RX_BUF_SIZE];
 static uint16_t s_rx_len;
+
+/* 这些缓冲区比较大，放到静态区，避免函数调用时占用过多栈空间。 */
+static uint8_t s_tx_frame_buf[ADC_TCP_RX_BUF_SIZE];
+static uint8_t s_adc_stream_payload[ADC_FRAME_MAX_BYTES];
+static adc_acq_sample_t s_adc_stream_samples[ADC_FRAME_BATCH_GROUP_COUNT];
+
+static uint8_t s_network_config_dirty;
 
 /* ========================== Function Prototypes ======================== */
 
@@ -159,6 +227,23 @@ static err_t adc_tcp_server_send_frame(struct tcp_pcb *tpcb,
 
 static adc_param_block_t *adc_tcp_server_find_param_block(uint16_t block_id);
 
+static uint8_t adc_tcp_server_apply_network_param(uint16_t block_id,
+                                                  const uint8_t *data,
+                                                  uint16_t len);
+
+static uint8_t adc_tcp_server_apply_cal_param(const uint8_t *data,
+                                              uint16_t len);
+
+static int32_t adc_tcp_server_get_i32_be(const uint8_t *buf,
+                                         uint16_t *index);
+
+static void adc_tcp_server_apply_control_param(const uint8_t *data,
+                                               uint16_t len);
+
+static void adc_tcp_server_pump_adc_stream(void);
+
+static void adc_tcp_server_sync_param_blocks_from_config(void);
+
 static void adc_tcp_server_parse_rx(struct tcp_pcb *tpcb);
 
 static void adc_tcp_server_handle_frame(struct tcp_pcb *tpcb,
@@ -166,12 +251,31 @@ static void adc_tcp_server_handle_frame(struct tcp_pcb *tpcb,
                                         const uint8_t *payload,
                                         uint16_t payload_len);
 
+static err_t adc_tcp_server_send_write_status(struct tcp_pcb *tpcb,
+                                              uint16_t block_id,
+                                              uint8_t status);
+
+static uint8_t adc_tcp_server_check_write_param_len(uint16_t block_id,
+                                                    uint16_t len);
+
+static void adc_tcp_server_send_debug_status(void);
+
+static void adc_tcp_server_put_u32(uint8_t *buf,
+                                   uint16_t *index,
+                                   uint32_t value);
+
+static void adc_tcp_server_put_u16(uint8_t *buf,
+                                   uint16_t *index,
+                                   uint16_t value);
+
 /* ============================ Public API =============================== */
 
 void adc_tcp_server_init(void)
 {
     struct tcp_pcb *pcb;
     err_t err;
+
+    adc_tcp_server_sync_param_blocks_from_config();
 
     SEGGER_RTT_WriteString(0, "tcp init begin\r\n");
 
@@ -205,19 +309,22 @@ void adc_tcp_server_init(void)
 
 void adc_tcp_server_process(void)
 {
-    /*
-     * 这里会长期被 main loop 调用。
-     * 当前阶段先保留接口；下一步做 ADC 连续上传时，把“周期发送”逻辑放这里。
-     */
     if (0U != s_adc_stream_enabled)
     {
-        /* TODO: pump ADC stream frames. */
+        adc_tcp_server_pump_adc_stream();
     }
+
+    adc_tcp_server_send_debug_status();
 }
 
 uint8_t adc_tcp_server_has_client(void)
 {
     return (NULL != s_client_pcb) ? 1U : 0U;
+}
+
+uint8_t adc_tcp_server_is_network_config_dirty(void)
+{
+    return s_network_config_dirty;
 }
 
 /* =========================== lwIP Callbacks ============================ */
@@ -233,10 +340,6 @@ static err_t adc_tcp_server_accept(void *arg,
         return ERR_VAL;
     }
 
-    /*
-     * 当前先做单客户端模式：监听 PCB 继续存在，但同一时间只服务一个 client PCB。
-     * 后面如果要多客户端，就不能只用一个全局 s_client_pcb，需要给每个连接分配上下文。
-     */
     if (NULL != s_client_pcb)
     {
         tcp_close(newpcb);
@@ -244,6 +347,7 @@ static err_t adc_tcp_server_accept(void *arg,
     }
 
     s_client_pcb = newpcb;
+    s_tcp_sndbuf_min = tcp_sndbuf(newpcb);
     s_adc_stream_enabled = 0U;
     s_rx_len = 0U;
 
@@ -332,10 +436,6 @@ static void adc_tcp_server_store_pbuf(struct tcp_pcb *tpcb, struct pbuf *p)
 
     if ((s_rx_len + copy_len) > ADC_TCP_RX_BUF_SIZE)
     {
-        /*
-         * 缓存满时先丢弃旧数据，避免协议解析一直卡在半包或脏数据上。
-         * tcp_recved 仍然要调用，告诉 lwIP 这些字节已经被应用层处理掉。
-         */
         s_rx_len = 0U;
         SEGGER_RTT_WriteString(0, "rx buf overflow\r\n");
     }
@@ -371,11 +471,7 @@ static void adc_tcp_server_remove_frame(uint16_t frame_len)
 }
 
 /* =========================== Protocol Parser =========================== */
-/*crc校验反射实现
-初始值：0xFFFFFFFF
-多项式反射形式：0xEDB88320
-每个字节低位先处理
-最终结果异或：0xFFFFFFFF*/
+
 static uint32_t adc_proto_crc32(const uint8_t *data, uint16_t len)
 {
     uint32_t crc = 0xFFFFFFFFUL;
@@ -442,7 +538,6 @@ static uint8_t adc_proto_is_frame_valid(const uint8_t *frame,
         return 0U;
     }
 
-    /* 校验范围：帧头 + 命令 + 长度 + payload，不包含校验字段和帧尾。 */
     crc_len = (uint16_t)(ADC_PROTO_HEADER_SIZE + payload_len);
     crc_calc = adc_proto_crc32(frame, crc_len);
     crc_recv = ((uint32_t)frame[ADC_PROTO_HEADER_SIZE + payload_len] << 24) |
@@ -458,13 +553,12 @@ static err_t adc_tcp_server_send_frame(struct tcp_pcb *tpcb,
                                        const uint8_t *payload,
                                        uint16_t payload_len)
 {
-    uint8_t frame[ADC_TCP_RX_BUF_SIZE];
+    uint8_t *frame = s_tx_frame_buf;
     uint16_t frame_len;
-    uint32_t crc;
     uint16_t crc_len;
+    uint32_t crc;
     err_t err;
 
-    // 1.检查参数是否合法
     if (NULL == tpcb)
     {
         return ERR_ARG;
@@ -480,29 +574,25 @@ static err_t adc_tcp_server_send_frame(struct tcp_pcb *tpcb,
         return ERR_ARG;
     }
 
-    // 2.计算整帧长度
     frame_len = (uint16_t)(payload_len + ADC_PROTO_FRAME_OVERHEAD);
 
-    // 3.检查tcp发送缓存是否够用
     if (tcp_sndbuf(tpcb) < frame_len)
     {
         return ERR_MEM;
     }
 
-    // 4.填协议帧固定头部
+    /* Protocol frame: 12 34 CMD LEN_H LEN_L PAYLOAD CRC32 56 78. */
     frame[0] = ADC_PROTO_SOF0;
     frame[1] = ADC_PROTO_SOF1;
     frame[2] = cmd;
     frame[3] = (uint8_t)(payload_len >> 8);
     frame[4] = (uint8_t)(payload_len & 0xFFU);
 
-    // 5.拷贝payload
     if (payload_len > 0U)
     {
         memcpy(&frame[ADC_PROTO_HEADER_SIZE], payload, payload_len);
     }
 
-    // 6.计算并填写校验和帧尾
     crc_len = (uint16_t)(ADC_PROTO_HEADER_SIZE + payload_len);
     crc = adc_proto_crc32(frame, crc_len);
 
@@ -510,11 +600,9 @@ static err_t adc_tcp_server_send_frame(struct tcp_pcb *tpcb,
     frame[ADC_PROTO_HEADER_SIZE + payload_len + 1U] = (uint8_t)(crc >> 16);
     frame[ADC_PROTO_HEADER_SIZE + payload_len + 2U] = (uint8_t)(crc >> 8);
     frame[ADC_PROTO_HEADER_SIZE + payload_len + 3U] = (uint8_t)(crc & 0xFFU);
-
     frame[ADC_PROTO_HEADER_SIZE + payload_len + 4U] = ADC_PROTO_EOF0;
     frame[ADC_PROTO_HEADER_SIZE + payload_len + 5U] = ADC_PROTO_EOF1;
 
-    // 7.交给lwip发送
     err = tcp_write(tpcb, frame, frame_len, TCP_WRITE_FLAG_COPY);
     if (ERR_OK != err)
     {
@@ -539,9 +627,252 @@ static adc_param_block_t *adc_tcp_server_find_param_block(uint16_t block_id)
     return NULL;
 }
 
-static void adc_tcp_server_apply_network_param(uint16_t block_id,
-                                               const uint8_t *data,
-                                               uint16_t len);
+static void adc_tcp_server_sync_param_blocks_from_config(void)
+{
+    const device_network_config_t *net_cfg;
+    const device_adc_cal_config_t *cal_cfg;
+    uint16_t index;
+    uint8_t ch;
+
+    net_cfg = device_config_get_network();
+    cal_cfg = device_config_get_adc_calibration();
+
+    memcpy(s_param_ip_addr, net_cfg->ip, sizeof(net_cfg->ip));
+    memcpy(s_param_mac_addr, net_cfg->mac, sizeof(net_cfg->mac));
+
+    s_param_port[0] = (uint8_t)(net_cfg->tcp_port >> 8);
+    s_param_port[1] = (uint8_t)(net_cfg->tcp_port & 0xFFU);
+
+    memcpy(s_param_netmask, net_cfg->netmask, sizeof(net_cfg->netmask));
+    memcpy(s_param_gateway, net_cfg->gateway, sizeof(net_cfg->gateway));
+
+    index = 0U;
+    for (ch = 0U; ch < DEVICE_CONFIG_ADC_CHANNEL_COUNT; ch++)
+    {
+        adc_tcp_server_put_u32(s_param_cal_data,
+                               &index,
+                               (uint32_t)cal_cfg->ch[ch].k_raw);
+        adc_tcp_server_put_u32(s_param_cal_data,
+                               &index,
+                               (uint32_t)cal_cfg->ch[ch].b_raw);
+    }
+}
+
+static err_t adc_tcp_server_send_write_status(struct tcp_pcb *tpcb,
+                                              uint16_t block_id,
+                                              uint8_t status)
+{
+    uint8_t payload[3];
+
+    payload[0] = (uint8_t)(block_id >> 8);
+    payload[1] = (uint8_t)(block_id & 0xFFU);
+    payload[2] = status;
+
+    return adc_tcp_server_send_frame(tpcb,
+                                     ADC_PROTO_CMD_WRITE_PARAM,
+                                     payload,
+                                     sizeof(payload));
+}
+
+static uint8_t adc_tcp_server_check_write_param_len(uint16_t block_id,
+                                                    uint16_t len)
+{
+    if (ADC_PARAM_BLOCK_CAL_DATA == block_id)
+    {
+        return (ADC_CAL_PARAM_BYTES == len)
+                   ? ADC_PROTO_WRITE_STATUS_OK
+                   : ADC_PROTO_WRITE_STATUS_BAD_LEN;
+    }
+
+    if (ADC_PARAM_BLOCK_IP_ADDR == block_id)
+    {
+        return (sizeof(s_param_ip_addr) == len)
+                   ? ADC_PROTO_WRITE_STATUS_OK
+                   : ADC_PROTO_WRITE_STATUS_BAD_LEN;
+    }
+    else if (ADC_PARAM_BLOCK_MAC_ADDR == block_id)
+    {
+        return (sizeof(s_param_mac_addr) == len)
+                   ? ADC_PROTO_WRITE_STATUS_OK
+                   : ADC_PROTO_WRITE_STATUS_BAD_LEN;
+    }
+    else if (ADC_PARAM_BLOCK_PORT == block_id)
+    {
+        return (sizeof(s_param_port) == len)
+                   ? ADC_PROTO_WRITE_STATUS_OK
+                   : ADC_PROTO_WRITE_STATUS_BAD_LEN;
+    }
+    else if (ADC_PARAM_BLOCK_NETMASK == block_id)
+    {
+        return (sizeof(s_param_netmask) == len)
+                   ? ADC_PROTO_WRITE_STATUS_OK
+                   : ADC_PROTO_WRITE_STATUS_BAD_LEN;
+    }
+    else if (ADC_PARAM_BLOCK_GATEWAY == block_id)
+    {
+        return (sizeof(s_param_gateway) == len)
+                   ? ADC_PROTO_WRITE_STATUS_OK
+                   : ADC_PROTO_WRITE_STATUS_BAD_LEN;
+    }
+
+    return ADC_PROTO_WRITE_STATUS_OK;
+}
+
+static void adc_tcp_server_apply_control_param(const uint8_t *data,
+                                               uint16_t len)
+{
+    if ((NULL == data) || (len < 2U))
+    {
+        return;
+    }
+
+    if (0U != data[0])
+    {
+        s_adc_stream_enabled = 1U;
+
+        if (ADC_STREAM_TYPE_CONVERTED == data[1])
+        {
+            s_adc_stream_type = ADC_STREAM_TYPE_CONVERTED;
+        }
+        else
+        {
+            s_adc_stream_type = ADC_STREAM_TYPE_RAW;
+        }
+
+        s_adc_stream_seq = 0U;
+        SEGGER_RTT_WriteString(0, "adc stream start\r\n");
+    }
+    else
+    {
+        s_adc_stream_enabled = 0U;
+        SEGGER_RTT_WriteString(0, "adc stream stop\r\n");
+    }
+}
+
+static int32_t adc_tcp_server_get_i32_be(const uint8_t *buf,
+                                         uint16_t *index)
+{
+    int32_t value;
+
+    value = (int32_t)(((uint32_t)buf[*index] << 24) |
+                      ((uint32_t)buf[*index + 1U] << 16) |
+                      ((uint32_t)buf[*index + 2U] << 8) |
+                      ((uint32_t)buf[*index + 3U]));
+
+    *index = (uint16_t)(*index + 4U);
+
+    return value;
+}
+
+static uint8_t adc_tcp_server_apply_cal_param(const uint8_t *data,
+                                              uint16_t len)
+{
+    device_adc_cal_config_t cal;
+    uint16_t index;
+    uint8_t ch;
+
+    if ((NULL == data) || (ADC_CAL_PARAM_BYTES != len))
+    {
+        return ADC_PROTO_WRITE_STATUS_BAD_LEN;
+    }
+
+    index = 0U;
+
+    for (ch = 0U; ch < DEVICE_CONFIG_ADC_CHANNEL_COUNT; ch++)
+    {
+        cal.ch[ch].k_raw = adc_tcp_server_get_i32_be(data, &index);
+        cal.ch[ch].b_raw = adc_tcp_server_get_i32_be(data, &index);
+    }
+
+    device_config_set_adc_calibration(&cal);
+
+    return ADC_PROTO_WRITE_STATUS_OK;
+}
+
+static uint8_t adc_tcp_server_apply_network_param(uint16_t block_id,
+                                                  const uint8_t *data,
+                                                  uint16_t len)
+{
+    device_network_config_t net_cfg;
+
+    if (NULL == data)
+    {
+        return ADC_PROTO_WRITE_STATUS_BAD_LEN;
+    }
+
+    memcpy(&net_cfg,
+           device_config_get_network(),
+           sizeof(net_cfg));
+
+    if (ADC_PARAM_BLOCK_IP_ADDR == block_id)
+    {
+        if (len < sizeof(net_cfg.ip))
+        {
+            SEGGER_RTT_WriteString(0, "net param ip bad len\r\n");
+            return ADC_PROTO_WRITE_STATUS_BAD_LEN;
+        }
+
+        memcpy(net_cfg.ip, data, sizeof(net_cfg.ip));
+    }
+    else if (ADC_PARAM_BLOCK_MAC_ADDR == block_id)
+    {
+        if (len < sizeof(net_cfg.mac))
+        {
+            SEGGER_RTT_WriteString(0, "net param mac bad len\r\n");
+            return ADC_PROTO_WRITE_STATUS_BAD_LEN;
+        }
+
+        memcpy(net_cfg.mac, data, sizeof(net_cfg.mac));
+    }
+    else if (ADC_PARAM_BLOCK_PORT == block_id)
+    {
+        if (len < 2U)
+        {
+            SEGGER_RTT_WriteString(0, "net param port bad len\r\n");
+            return ADC_PROTO_WRITE_STATUS_BAD_LEN;
+        }
+
+        net_cfg.tcp_port = (uint16_t)(((uint16_t)data[0] << 8) | data[1]);
+    }
+    else if (ADC_PARAM_BLOCK_NETMASK == block_id)
+    {
+        if (len < sizeof(net_cfg.netmask))
+        {
+            SEGGER_RTT_WriteString(0, "net param mask bad len\r\n");
+            return ADC_PROTO_WRITE_STATUS_BAD_LEN;
+        }
+
+        memcpy(net_cfg.netmask, data, sizeof(net_cfg.netmask));
+    }
+    else if (ADC_PARAM_BLOCK_GATEWAY == block_id)
+    {
+        if (len < sizeof(net_cfg.gateway))
+        {
+            SEGGER_RTT_WriteString(0, "net param gateway bad len\r\n");
+            return ADC_PROTO_WRITE_STATUS_BAD_LEN;
+        }
+
+        memcpy(net_cfg.gateway, data, sizeof(net_cfg.gateway));
+    }
+    else
+    {
+        return ADC_PROTO_WRITE_STATUS_OK;
+    }
+
+    device_config_set_network(&net_cfg);
+    s_network_config_dirty = 1U;
+
+    if (HAL_OK == device_config_save_network())
+    {
+        SEGGER_RTT_WriteString(0, "net param saved\r\n");
+        SEGGER_RTT_WriteString(0, "net param applied\r\n");
+        return ADC_PROTO_WRITE_STATUS_OK;
+    }
+
+    SEGGER_RTT_WriteString(0, "net param save pending\r\n");
+    SEGGER_RTT_WriteString(0, "net param applied\r\n");
+    return ADC_PROTO_WRITE_STATUS_SAVE_PENDING;
+}
 
 static void adc_tcp_server_parse_rx(struct tcp_pcb *tpcb)
 {
@@ -604,6 +935,7 @@ static void adc_tcp_server_handle_frame(struct tcp_pcb *tpcb,
     uint16_t block_id;
     uint16_t response_len;
     uint16_t write_len;
+    uint8_t write_status;
     uint8_t response_payload[ADC_TCP_RX_BUF_SIZE];
 
     if (ADC_PROTO_CMD_HEARTBEAT == cmd)
@@ -621,6 +953,9 @@ static void adc_tcp_server_handle_frame(struct tcp_pcb *tpcb,
         if (payload_len < 2U)
         {
             SEGGER_RTT_WriteString(0, "write param bad len\r\n");
+            (void)adc_tcp_server_send_write_status(tpcb,
+                                                   0xFFFFU,
+                                                   ADC_PROTO_WRITE_STATUS_BAD_LEN);
             return;
         }
 
@@ -629,6 +964,9 @@ static void adc_tcp_server_handle_frame(struct tcp_pcb *tpcb,
         if (NULL == block)
         {
             SEGGER_RTT_WriteString(0, "write param not found\r\n");
+            (void)adc_tcp_server_send_write_status(tpcb,
+                                                   block_id,
+                                                   ADC_PROTO_WRITE_STATUS_NOT_FOUND);
             return;
         }
 
@@ -636,6 +974,19 @@ static void adc_tcp_server_handle_frame(struct tcp_pcb *tpcb,
         if (write_len > block->max_len)
         {
             SEGGER_RTT_WriteString(0, "write param too long\r\n");
+            (void)adc_tcp_server_send_write_status(tpcb,
+                                                   block_id,
+                                                   ADC_PROTO_WRITE_STATUS_TOO_LONG);
+            return;
+        }
+
+        write_status = adc_tcp_server_check_write_param_len(block_id, write_len);
+        if (ADC_PROTO_WRITE_STATUS_OK != write_status)
+        {
+            SEGGER_RTT_WriteString(0, "write param bad len\r\n");
+            (void)adc_tcp_server_send_write_status(tpcb,
+                                                   block_id,
+                                                   write_status);
             return;
         }
 
@@ -645,10 +996,25 @@ static void adc_tcp_server_handle_frame(struct tcp_pcb *tpcb,
         }
         block->len = write_len;
 
-        (void)adc_tcp_server_send_frame(tpcb,
-                                        ADC_PROTO_CMD_WRITE_PARAM,
-                                        payload,
-                                        payload_len);
+        if (ADC_PARAM_BLOCK_CONTROL == block_id)
+        {
+            adc_tcp_server_apply_control_param(block->data, block->len);
+            write_status = ADC_PROTO_WRITE_STATUS_OK;
+        }
+        else if (ADC_PARAM_BLOCK_CAL_DATA == block_id)
+        {
+            write_status = adc_tcp_server_apply_cal_param(block->data, block->len);
+        }
+        else
+        {
+            write_status = adc_tcp_server_apply_network_param(block_id,
+                                                              block->data,
+                                                              block->len);
+        }
+
+        (void)adc_tcp_server_send_write_status(tpcb,
+                                               block_id,
+                                               write_status);
     }
     else if (ADC_PROTO_CMD_READ_PARAM == cmd)
     {
@@ -690,5 +1056,179 @@ static void adc_tcp_server_handle_frame(struct tcp_pcb *tpcb,
     else
     {
         SEGGER_RTT_WriteString(0, "proto unknown cmd\r\n");
+    }
+}
+
+static void adc_tcp_server_put_u32(uint8_t *buf,
+                                   uint16_t *index,
+                                   uint32_t value)
+{
+    buf[(*index)++] = (uint8_t)(value >> 24);
+    buf[(*index)++] = (uint8_t)(value >> 16);
+    buf[(*index)++] = (uint8_t)(value >> 8);
+    buf[(*index)++] = (uint8_t)(value & 0xFFU);
+}
+
+static void adc_tcp_server_put_u16(uint8_t *buf,
+                                   uint16_t *index,
+                                   uint16_t value)
+{
+    buf[(*index)++] = (uint8_t)(value >> 8);
+    buf[(*index)++] = (uint8_t)(value & 0xFFU);
+}
+
+static void adc_tcp_server_send_debug_status(void)
+{
+    adc_acq_stats_t stats;
+    uint8_t payload[64];
+    uint16_t index = 0U;
+    uint32_t now_tick;
+
+    if (NULL == s_client_pcb)
+    {
+        return;
+    }
+
+    now_tick = HAL_GetTick();
+
+    if ((now_tick - s_debug_status_last_tick) < 1000U)
+    {
+        return;
+    }
+
+    s_debug_status_last_tick = now_tick;
+
+    adc_acq_service_get_stats(&stats);
+
+    adc_tcp_server_put_u32(payload, &index, stats.adc1_half_count);
+    adc_tcp_server_put_u32(payload, &index, stats.adc2_half_count);
+    adc_tcp_server_put_u32(payload, &index, stats.adc3_half_count);
+
+    adc_tcp_server_put_u32(payload, &index, stats.adc1_full_count);
+    adc_tcp_server_put_u32(payload, &index, stats.adc2_full_count);
+    adc_tcp_server_put_u32(payload, &index, stats.adc3_full_count);
+
+    adc_tcp_server_put_u32(payload, &index, stats.sample_seq);
+    adc_tcp_server_put_u32(payload, &index, stats.no_block_count);
+
+    adc_tcp_server_put_u32(payload, &index, s_tcp_send_fail_count);
+    adc_tcp_server_put_u32(payload, &index, s_adc_stream_seq);
+    adc_tcp_server_put_u16(payload, &index, s_tcp_sndbuf_min);
+
+    (void)adc_tcp_server_send_frame(s_client_pcb,
+                                    ADC_PROTO_RSP_DEBUG_STATUS,
+                                    payload,
+                                    index);
+}
+
+static void adc_tcp_server_pump_adc_stream(void)
+{
+    uint16_t payload_len;
+    uint16_t frame_len;
+    uint8_t frame_count;
+    uint16_t sample_count;
+    uint16_t sndbuf_now;
+    uint16_t max_sample_count;
+
+    if (NULL == s_client_pcb)
+    {
+        s_adc_stream_enabled = 0U;
+        return;
+    }
+
+    for (frame_count = 0U;
+         frame_count < ADC_STREAM_MAX_FRAMES_PER_PUMP;
+         frame_count++)
+    {
+        sndbuf_now = tcp_sndbuf(s_client_pcb);
+
+        if ((0U == s_tcp_sndbuf_min) || (sndbuf_now < s_tcp_sndbuf_min))
+        {
+            s_tcp_sndbuf_min = sndbuf_now;
+        }
+
+        if (sndbuf_now < (uint16_t)(ADC_FRAME_MAX_BYTES + ADC_PROTO_FRAME_OVERHEAD + ADC_STREAM_TCP_SEND_MARGIN))
+        {
+            return;
+        }
+
+        if (ADC_STREAM_TYPE_CONVERTED == s_adc_stream_type)
+        {
+            max_sample_count = ADC_FRAME_CONVERTED_BATCH_GROUP_COUNT;
+        }
+        else
+        {
+            max_sample_count = ADC_FRAME_BATCH_GROUP_COUNT;
+        }
+
+        sample_count = 0U;
+        while (sample_count < max_sample_count)
+        {
+            if (0U == adc_acq_service_get_sample(&s_adc_stream_samples[sample_count]))
+            {
+                break;
+            }
+
+            sample_count++;
+        }
+
+        if (0U == sample_count)
+        {
+            return;
+        }
+
+        if (ADC_STREAM_TYPE_CONVERTED == s_adc_stream_type)
+        {
+            payload_len = adc_frame_builder_build_cal_float_batch(s_adc_stream_samples,
+                                                                  sample_count,
+                                                                  s_adc_stream_seq,
+                                                                  0x0FFFU,
+                                                                  device_config_get_adc_calibration(),
+                                                                  s_adc_stream_payload,
+                                                                  sizeof(s_adc_stream_payload));
+        }
+        else
+        {
+            payload_len = adc_frame_builder_build_raw_u16_batch(s_adc_stream_samples,
+                                                                sample_count,
+                                                                s_adc_stream_seq,
+                                                                0x0FFFU,
+                                                                s_adc_stream_payload,
+                                                                sizeof(s_adc_stream_payload));
+        }
+
+        if (0U == payload_len)
+        {
+            return;
+        }
+
+        /*
+         * Check lwIP send buffer again with the actual frame length.
+         * If the buffer is tight, wait for the next main-loop pump.
+         */
+        frame_len = (uint16_t)(payload_len + ADC_PROTO_FRAME_OVERHEAD);
+
+        sndbuf_now = tcp_sndbuf(s_client_pcb);
+
+        if ((0U == s_tcp_sndbuf_min) || (sndbuf_now < s_tcp_sndbuf_min))
+        {
+            s_tcp_sndbuf_min = sndbuf_now;
+        }
+
+        if (sndbuf_now < (uint16_t)(frame_len + ADC_STREAM_TCP_SEND_MARGIN))
+        {
+            return;
+        }
+
+        if (ERR_OK != adc_tcp_server_send_frame(s_client_pcb,
+                                                s_adc_stream_type,
+                                                s_adc_stream_payload,
+                                                payload_len))
+        {
+            s_tcp_send_fail_count++;
+            return;
+        }
+
+        s_adc_stream_seq += sample_count;
     }
 }

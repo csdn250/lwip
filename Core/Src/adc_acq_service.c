@@ -6,6 +6,9 @@
 #define ADC2_CHANNELS_PER_GROUP 1U
 #define ADC3_CHANNELS_PER_GROUP 7U
 
+#define ADC_ACQ_BLOCK_HALF 0U
+#define ADC_ACQ_BLOCK_FULL 1U
+
 #define ADC_ACQ_HALF_COUNT ADC_ACQ_GROUPS_PER_HALF
 #define ADC_ACQ_TOTAL_GROUP_COUNT (ADC_ACQ_GROUPS_PER_HALF * 2U)
 
@@ -25,13 +28,31 @@ static volatile uint8_t s_adc1_full_ready;
 static volatile uint8_t s_adc2_full_ready;
 static volatile uint8_t s_adc3_full_ready;
 
-//当前应该从哪个“块”读数据？0 代表前半部分（Block 0），1 代表后半部分（Block 1）。
+static volatile uint32_t s_adc1_half_count;
+static volatile uint32_t s_adc2_half_count;
+static volatile uint32_t s_adc3_half_count;
+
+static volatile uint32_t s_adc1_full_count;
+static volatile uint32_t s_adc2_full_count;
+static volatile uint32_t s_adc3_full_count;
+
+static uint32_t s_no_block_count;
+
+/*
+ * Read state:
+ *   s_next_read_block   Preferred next DMA block: half or full.
+ *   s_read_block        Locked DMA block currently being drained.
+ *   s_read_group_index  Sample-group index inside the locked block.
+ *   s_block_ready       1 means a block is locked and can be read safely.
+ */
+static uint8_t s_next_read_block;
 static uint8_t s_read_block;
-//在当前这个块里，我已经读到第几个“组”了
 static uint16_t s_read_group_index;
-//当前是否有整个块的数据锁定了，可以安心读取？（1 表示锁定了，0 表示空闲或正在等待转换完毕）。
 static uint8_t s_block_ready;
 static uint32_t s_sample_seq;
+
+static uint8_t adc_acq_service_try_lock_block(uint8_t block);
+static uint8_t adc_acq_service_lock_next_block(void);
 
 void adc_acq_service_init(void)
 {
@@ -43,7 +64,18 @@ void adc_acq_service_init(void)
     s_adc2_full_ready = 0U;
     s_adc3_full_ready = 0U;
 
-    s_read_block = 0U;
+    s_adc1_half_count = 0U;
+    s_adc2_half_count = 0U;
+    s_adc3_half_count = 0U;
+
+    s_adc1_full_count = 0U;
+    s_adc2_full_count = 0U;
+    s_adc3_full_count = 0U;
+
+    s_no_block_count = 0U;
+
+    s_next_read_block = ADC_ACQ_BLOCK_HALF;
+    s_read_block = ADC_ACQ_BLOCK_HALF;
     s_read_group_index = 0U;
     s_block_ready = 0U;
     s_sample_seq = 0U;
@@ -82,32 +114,9 @@ uint8_t adc_acq_service_get_sample(adc_acq_sample_t *sample)
 
     if (0U == s_block_ready)
     {
-        if ((0U != s_adc1_half_ready) &&
-            (0U != s_adc2_half_ready) &&
-            (0U != s_adc3_half_ready))
+        if (0U == adc_acq_service_lock_next_block())
         {
-            s_adc1_half_ready = 0U;
-            s_adc2_half_ready = 0U;
-            s_adc3_half_ready = 0U;
-
-            s_read_block = 0U;
-            s_read_group_index = 0U;
-            s_block_ready = 1U;
-        }
-        else if ((0U != s_adc1_full_ready) &&
-                 (0U != s_adc2_full_ready) &&
-                 (0U != s_adc3_full_ready))
-        {
-            s_adc1_full_ready = 0U;
-            s_adc2_full_ready = 0U;
-            s_adc3_full_ready = 0U;
-
-            s_read_block = 1U;
-            s_read_group_index = 0U;
-            s_block_ready = 1U;
-        }
-        else
-        {
+            s_no_block_count++;
             return 0U;
         }
     }
@@ -135,8 +144,8 @@ uint8_t adc_acq_service_get_sample(adc_acq_sample_t *sample)
     sample->raw[10] = s_adc3_dma_buf[adc3_base + 5U];
     sample->raw[11] = s_adc3_dma_buf[adc3_base + 6U];
 
-    ++s_sample_seq;
-    ++s_read_group_index;
+    s_sample_seq++;
+    s_read_group_index++;
 
     if (s_read_group_index >= ADC_ACQ_HALF_COUNT)
     {
@@ -152,14 +161,17 @@ void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
     if (hadc->Instance == ADC1)
     {
         s_adc1_half_ready = 1U;
+        s_adc1_half_count++;
     }
     else if (hadc->Instance == ADC2)
     {
         s_adc2_half_ready = 1U;
+        s_adc2_half_count++;
     }
     else if (hadc->Instance == ADC3)
     {
         s_adc3_half_ready = 1U;
+        s_adc3_half_count++;
     }
 }
 
@@ -168,15 +180,92 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc)
     if (hadc->Instance == ADC1)
     {
         s_adc1_full_ready = 1U;
+        s_adc1_full_count++;
     }
     else if (hadc->Instance == ADC2)
     {
         s_adc2_full_ready = 1U;
+        s_adc2_full_count++;
     }
     else if (hadc->Instance == ADC3)
     {
         s_adc3_full_ready = 1U;
+        s_adc3_full_count++;
     }
 }
 
+void adc_acq_service_get_stats(adc_acq_stats_t *stats)
+{
+    if (NULL == stats)
+    {
+        return;
+    }
 
+    stats->adc1_half_count = s_adc1_half_count;
+    stats->adc2_half_count = s_adc2_half_count;
+    stats->adc3_half_count = s_adc3_half_count;
+
+    stats->adc1_full_count = s_adc1_full_count;
+    stats->adc2_full_count = s_adc2_full_count;
+    stats->adc3_full_count = s_adc3_full_count;
+
+    stats->sample_seq = s_sample_seq;
+    stats->no_block_count = s_no_block_count;
+}
+
+static uint8_t adc_acq_service_try_lock_block(uint8_t block)
+{
+    if (ADC_ACQ_BLOCK_HALF == block)
+    {
+        if ((0U == s_adc1_half_ready) ||
+            (0U == s_adc2_half_ready) ||
+            (0U == s_adc3_half_ready))
+        {
+            return 0U;
+        }
+
+        s_adc1_half_ready = 0U;
+        s_adc2_half_ready = 0U;
+        s_adc3_half_ready = 0U;
+
+        s_read_block = ADC_ACQ_BLOCK_HALF;
+        s_next_read_block = ADC_ACQ_BLOCK_FULL;
+    }
+    else
+    {
+        if ((0U == s_adc1_full_ready) ||
+            (0U == s_adc2_full_ready) ||
+            (0U == s_adc3_full_ready))
+        {
+            return 0U;
+        }
+
+        s_adc1_full_ready = 0U;
+        s_adc2_full_ready = 0U;
+        s_adc3_full_ready = 0U;
+
+        s_read_block = ADC_ACQ_BLOCK_FULL;
+        s_next_read_block = ADC_ACQ_BLOCK_HALF;
+    }
+
+    s_read_group_index = 0U;
+    s_block_ready = 1U;
+
+    return 1U;
+}
+
+static uint8_t adc_acq_service_lock_next_block(void)
+{
+    uint8_t fallback_block;
+
+    if (0U != adc_acq_service_try_lock_block(s_next_read_block))
+    {
+        return 1U;
+    }
+
+    fallback_block = (ADC_ACQ_BLOCK_HALF == s_next_read_block)
+                         ? ADC_ACQ_BLOCK_FULL
+                         : ADC_ACQ_BLOCK_HALF;
+
+    return adc_acq_service_try_lock_block(fallback_block);
+}

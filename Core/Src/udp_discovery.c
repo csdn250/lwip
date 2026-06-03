@@ -23,6 +23,9 @@
 #define UDP_DISCOVERY_EOF0 0x56U
 #define UDP_DISCOVERY_EOF1 0x78U
 
+#define UDP_DISCOVERY_STATUS_TCP_CONNECTED 0x01U
+#define UDP_DISCOVERY_STATUS_NET_DIRTY 0x02U
+
 static struct udp_pcb *s_udp_pcb;
 static uint32_t s_last_broadcast_tick;
 
@@ -114,7 +117,7 @@ static uint16_t udp_discovery_build_payload(uint8_t *payload, uint16_t payload_s
     const device_network_config_t *net_cfg;
     uint16_t index = 0U;
 
-    if (57U > payload_size)
+    if (58U > payload_size)
     {
         return 0U;
     }
@@ -126,6 +129,20 @@ static uint16_t udp_discovery_build_payload(uint8_t *payload, uint16_t payload_s
     payload[index++] = 'D';
     payload[index++] = 'A';
     payload[index++] = 1U;
+
+    payload[index] = 0U;
+
+    if (0U != adc_tcp_server_has_client())
+    {
+        payload[index] |= UDP_DISCOVERY_STATUS_TCP_CONNECTED;
+    }
+
+    if (0U != adc_tcp_server_is_network_config_dirty())
+    {
+        payload[index] |= UDP_DISCOVERY_STATUS_NET_DIRTY;
+    }
+
+    index++;
 
     memcpy(&payload[index], net_cfg->mac, sizeof(net_cfg->mac));
     index += sizeof(net_cfg->mac);

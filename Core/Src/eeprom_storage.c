@@ -107,7 +107,7 @@ HAL_StatusTypeDef eeprom_storage_write(uint32_t address,
     }
 
     // 3.while循环写入数据
-    //页剩余计算、地址推进、len 递减、每页写完等待 ready
+    // 页剩余计算、地址推进、len 递减、每页写完等待 ready
     while (0U < len)
     {
         page_remain = (uint16_t)(EEPROM_STORAGE_PAGE_SIZE -
