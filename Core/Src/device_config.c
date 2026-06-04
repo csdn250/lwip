@@ -18,6 +18,7 @@ typedef struct
 
 static device_network_config_t s_network_config;
 static device_adc_cal_config_t s_adc_cal_config;
+static device_dac_config_t s_dac_config;
 
 static uint32_t device_config_crc32(const uint8_t *data, uint16_t len);
 
@@ -26,8 +27,8 @@ void device_config_init_defaults(void)
     uint8_t ch;
 
     memset(&s_network_config, 0, sizeof(s_network_config));
-
     memset(&s_adc_cal_config, 0, sizeof(s_adc_cal_config));
+    memset(&s_dac_config, 0, sizeof(s_dac_config));
 
     s_network_config.mac[0] = 0x02U;
     s_network_config.mac[1] = 0x00U;
@@ -60,6 +61,15 @@ void device_config_init_defaults(void)
         s_adc_cal_config.ch[ch].k_raw = DEVICE_CONFIG_ADC_CAL_DEFAULT_K_RAW;
         s_adc_cal_config.ch[ch].b_raw = DEVICE_CONFIG_ADC_CAL_DEFAULT_B_RAW;
     }
+
+    for (ch = 0U; ch < DEVICE_CONFIG_DAC_CHANNEL_COUNT; ch++)
+    {
+        s_dac_config.ch[ch].mode = DEVICE_CONFIG_DAC_MODE_MANUAL;
+        s_dac_config.ch[ch].manual_raw = 0L;
+        s_dac_config.ch[ch].adc_channel = DEVICE_CONFIG_DAC_ADC_CH_INVALID;
+        s_dac_config.ch[ch].k_raw = DEVICE_CONFIG_DAC_CAL_DEFAULT_K_RAW;
+        s_dac_config.ch[ch].b_raw = DEVICE_CONFIG_DAC_CAL_DEFAULT_B_RAW;
+    }
 }
 
 const device_network_config_t *device_config_get_network(void)
@@ -90,6 +100,21 @@ void device_config_set_adc_calibration(const device_adc_cal_config_t *config)
     }
 
     memcpy(&s_adc_cal_config, config, sizeof(s_adc_cal_config));
+}
+
+const device_dac_config_t *device_config_get_dac_config(void)
+{
+    return &s_dac_config;
+}
+
+void device_config_set_dac_config(const device_dac_config_t *config)
+{
+    if (NULL == config)
+    {
+        return;
+    }
+
+    memcpy(&s_dac_config, config, sizeof(s_dac_config));
 }
 
 HAL_StatusTypeDef device_config_save_network(void)

@@ -52,8 +52,6 @@ static void dac_tpc112s4_write_frame(uint16_t frame)
     dac_tpc112s4_delay_short();
 }
 
-
-
 static void dac_tpc112s4_load_update(void)
 {
     DAC_LOAD_LOW();
@@ -62,6 +60,36 @@ static void dac_tpc112s4_load_update(void)
     dac_tpc112s4_delay_short();
 
     DAC_LOAD_HIGH();
+}
+
+void dac_tpc112s4_write_channel(uint8_t channel,
+                                uint16_t code)
+{
+    uint8_t hw_channel;
+
+    if (DAC_TPC112S4_CHANNEL_COUNT <= channel)
+    {
+        return;
+    }
+
+    hw_channel = (uint8_t)(DAC_TPC112S4_CH_A + channel);
+
+    dac_tpc112s4_write_frame(dac_tpc112s4_make_frame(hw_channel,
+                                                     code));
+    dac_tpc112s4_load_update();
+}
+
+void dac_tpc112s4_write_all(uint16_t ch1,
+                            uint16_t ch2,
+                            uint16_t ch3,
+                            uint16_t ch4)
+{
+    dac_tpc112s4_write_frame(dac_tpc112s4_make_frame(DAC_TPC112S4_CH_A, ch1));
+    dac_tpc112s4_write_frame(dac_tpc112s4_make_frame(DAC_TPC112S4_CH_B, ch2));
+    dac_tpc112s4_write_frame(dac_tpc112s4_make_frame(DAC_TPC112S4_CH_C, ch3));
+    dac_tpc112s4_write_frame(dac_tpc112s4_make_frame(DAC_TPC112S4_CH_D, ch4));
+
+    dac_tpc112s4_load_update();
 }
 
 void dac_tpc112s4_test_pattern(void)

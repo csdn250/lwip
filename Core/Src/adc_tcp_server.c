@@ -82,6 +82,10 @@
 
 #define ADC_PROTO_RSP_DEBUG_STATUS 0x83U
 
+#define DAC_PARAM_BYTES 14U
+
+#define ADC_TCP_DEBUG_STATUS_ENABLE 0U
+
 typedef struct
 {
     uint16_t block_id;
@@ -234,6 +238,10 @@ static uint8_t adc_tcp_server_apply_network_param(uint16_t block_id,
 static uint8_t adc_tcp_server_apply_cal_param(const uint8_t *data,
                                               uint16_t len);
 
+static uint8_t adc_tcp_server_apply_dac_param(uint16_t block_id,
+                                              const uint8_t *data,
+                                              uint16_t len);
+
 static int32_t adc_tcp_server_get_i32_be(const uint8_t *buf,
                                          uint16_t *index);
 
@@ -267,6 +275,9 @@ static void adc_tcp_server_put_u32(uint8_t *buf,
 static void adc_tcp_server_put_u16(uint8_t *buf,
                                    uint16_t *index,
                                    uint16_t value);
+
+static void adc_tcp_server_sync_dac_param_block(uint8_t *buf,
+                                                const device_dac_channel_config_t *config);
 
 /* ============================ Public API =============================== */
 
@@ -314,7 +325,9 @@ void adc_tcp_server_process(void)
         adc_tcp_server_pump_adc_stream();
     }
 
+#if ADC_TCP_DEBUG_STATUS_ENABLE
     adc_tcp_server_send_debug_status();
+#endif
 }
 
 uint8_t adc_tcp_server_has_client(void)
@@ -627,15 +640,46 @@ static adc_param_block_t *adc_tcp_server_find_param_block(uint16_t block_id)
     return NULL;
 }
 
+static void adc_tcp_server_sync_dac_param_block(uint8_t *buf,
+                                                const device_dac_channel_config_t *config)
+{
+    uint16_t index;
+
+    if ((NULL == buf) || (NULL == config))
+    {
+        return;
+    }
+
+    index = 0U;
+
+    buf[index++] = config->mode;
+
+    adc_tcp_server_put_u32(buf,
+                           &index,
+                           (uint32_t)config->manual_raw);
+
+    buf[index++] = config->adc_channel;
+
+    adc_tcp_server_put_u32(buf,
+                           &index,
+                           (uint32_t)config->b_raw);
+    adc_tcp_server_put_u32(buf,
+                           &index,
+                           (uint32_t)config->b_raw);
+}
+
 static void adc_tcp_server_sync_param_blocks_from_config(void)
 {
     const device_network_config_t *net_cfg;
     const device_adc_cal_config_t *cal_cfg;
+    const device_dac_config_t *dac_cfg;
+
     uint16_t index;
     uint8_t ch;
 
     net_cfg = device_config_get_network();
     cal_cfg = device_config_get_adc_calibration();
+    dac_cfg = device_config_get_dac_config();
 
     memcpy(s_param_ip_addr, net_cfg->ip, sizeof(net_cfg->ip));
     memcpy(s_param_mac_addr, net_cfg->mac, sizeof(net_cfg->mac));
@@ -655,6 +699,15 @@ static void adc_tcp_server_sync_param_blocks_from_config(void)
         adc_tcp_server_put_u32(s_param_cal_data,
                                &index,
                                (uint32_t)cal_cfg->ch[ch].b_raw);
+
+        adc_tcp_server_sync_dac_param_block(s_param_da_ch1,
+                                            &dac_cfg->ch[0]);
+        adc_tcp_server_sync_dac_param_block(s_param_da_ch2,
+                                            &dac_cfg->ch[1]);
+        adc_tcp_server_sync_dac_param_block(s_param_da_ch3,
+                                            &dac_cfg->ch[2]);
+        adc_tcp_server_sync_dac_param_block(s_param_da_ch4,
+                                            &dac_cfg->ch[3]);
     }
 }
 
@@ -680,6 +733,14 @@ static uint8_t adc_tcp_server_check_write_param_len(uint16_t block_id,
     if (ADC_PARAM_BLOCK_CAL_DATA == block_id)
     {
         return (ADC_CAL_PARAM_BYTES == len)
+                   ? ADC_PROTO_WRITE_STATUS_OK
+                   : ADC_PROTO_WRITE_STATUS_BAD_LEN;
+    }
+
+    if ((ADC_PARAM_BLOCK_DA_CH1 <= block_id) &&
+        (ADC_PARAM_BLOCK_DA_CH4 >= block_id))
+    {
+        return (DAC_PARAM_BYTES == len)
                    ? ADC_PROTO_WRITE_STATUS_OK
                    : ADC_PROTO_WRITE_STATUS_BAD_LEN;
     }
@@ -739,7 +800,7 @@ static void adc_tcp_server_apply_control_param(const uint8_t *data,
             s_adc_stream_type = ADC_STREAM_TYPE_RAW;
         }
 
-        //启动时清零方便上位机判断
+        // 启动时清零方便上位机判断
         s_adc_stream_seq = 0U;
         SEGGER_RTT_WriteString(0, "adc stream start\r\n");
     }
@@ -786,6 +847,62 @@ static uint8_t adc_tcp_server_apply_cal_param(const uint8_t *data,
     }
 
     device_config_set_adc_calibration(&cal);
+
+    return ADC_PROTO_WRITE_STATUS_OK;
+}
+
+static uint8_t adc_tcp_server_apply_dac_param(uint16_t block_id,
+                                              const uint8_t *data,
+                                              uint16_t len)
+{
+    device_dac_config_t dac_config;
+    uint16_t index;
+    uint8_t dac_ch;
+
+    if ((NULL == data) || (DAC_PARAM_BYTES != len))
+    {
+        return ADC_PROTO_WRITE_STATUS_BAD_LEN;
+    }
+
+    if ((block_id < ADC_PARAM_BLOCK_DA_CH1) ||
+        (block_id > ADC_PARAM_BLOCK_DA_CH4))
+    {
+        return ADC_PROTO_WRITE_STATUS_NOT_FOUND;
+    }
+
+    dac_ch = (uint8_t)(block_id - ADC_PARAM_BLOCK_DA_CH1);
+
+    memcpy(&dac_config,
+           device_config_get_dac_config(),
+           sizeof(dac_config));
+
+    index = 0U;
+
+    dac_config.ch[dac_ch].mode = data[index++];
+
+    dac_config.ch[dac_ch].manual_raw = adc_tcp_server_get_i32_be(data, &index);
+
+    dac_config.ch[dac_ch].adc_channel = data[index++];
+
+    dac_config.ch[dac_ch].k_raw = adc_tcp_server_get_i32_be(data, &index);
+
+    dac_config.ch[dac_ch].b_raw = adc_tcp_server_get_i32_be(data, &index);
+
+    if (dac_config.ch[dac_ch].mode > DEVICE_CONFIG_DAC_MODE_ADC_CASCADE)
+    {
+        return ADC_PROTO_WRITE_STATUS_BAD_LEN;
+    }
+
+    if ((DEVICE_CONFIG_DAC_MODE_ADC_CASCADE == dac_config.ch[dac_ch].mode) &&
+        (dac_config.ch[dac_ch].adc_channel >= DEVICE_CONFIG_ADC_CHANNEL_COUNT))
+    {
+        return ADC_PROTO_WRITE_STATUS_BAD_LEN;
+    }
+
+    device_config_set_dac_config(&dac_config);
+    adc_tcp_server_sync_param_blocks_from_config();
+
+    SEGGER_RTT_WriteString(0, "dac param applied\r\n");
 
     return ADC_PROTO_WRITE_STATUS_OK;
 }
@@ -906,12 +1023,12 @@ static void adc_tcp_server_parse_rx(struct tcp_pcb *tpcb)
 
         if (s_rx_len < frame_len)
         {
-            return;//未接收完整等待下一次recv
+            return; // 未接收完整等待下一次recv
         }
 
         if (0U == adc_proto_is_frame_valid(s_rx_buf, frame_len))
         {
-            //误判出来的假帧头，往后寻找真的帧头
+            // 误判出来的假帧头，往后寻找真的帧头
             adc_tcp_server_drop_one_rx_byte();
             SEGGER_RTT_WriteString(0, "proto bad frame\r\n");
             continue;
@@ -922,7 +1039,7 @@ static void adc_tcp_server_parse_rx(struct tcp_pcb *tpcb)
                                     &s_rx_buf[ADC_PROTO_HEADER_SIZE],
                                     payload_len);
 
-        //将已处理的帧从接收缓冲区移除
+        // 将已处理的帧从接收缓冲区移除
         adc_tcp_server_remove_frame(frame_len);
     }
 }
@@ -968,9 +1085,9 @@ static void adc_tcp_server_handle_frame(struct tcp_pcb *tpcb,
             return;
         }
 
-        //取block_id
+        // 取block_id
         block_id = (uint16_t)(((uint16_t)payload[0] << 8) | payload[1]);
-        //查参数表
+        // 查参数表
         block = adc_tcp_server_find_param_block(block_id);
         if (NULL == block)
         {
@@ -981,7 +1098,7 @@ static void adc_tcp_server_handle_frame(struct tcp_pcb *tpcb,
             return;
         }
 
-        //检查写入长度，防止数据越界
+        // 检查写入长度，防止数据越界
 
         write_len = (uint16_t)(payload_len - 2U);
         if (write_len > block->max_len)
@@ -993,7 +1110,7 @@ static void adc_tcp_server_handle_frame(struct tcp_pcb *tpcb,
             return;
         }
 
-        //检查写入长度是否合法
+        // 检查写入长度是否合法
 
         write_status = adc_tcp_server_check_write_param_len(block_id, write_len);
         if (ADC_PROTO_WRITE_STATUS_OK != write_status)
@@ -1011,30 +1128,37 @@ static void adc_tcp_server_handle_frame(struct tcp_pcb *tpcb,
         }
         block->len = write_len;
 
-        //根据不同参数块，执行不同应用逻辑
+        // 根据不同参数块，执行不同应用逻辑
 
         if (ADC_PARAM_BLOCK_CONTROL == block_id)
         {
-            //启动/停止 ADC 数据流
+            // 启动/停止 ADC 数据流
 
             adc_tcp_server_apply_control_param(block->data, block->len);
             write_status = ADC_PROTO_WRITE_STATUS_OK;
         }
         else if (ADC_PARAM_BLOCK_CAL_DATA == block_id)
         {
-            //更新 device_config 里的 ADC 标定参数
+            // 更新 device_config 里的 ADC 标定参数
 
             write_status = adc_tcp_server_apply_cal_param(block->data, block->len);
         }
+        else if ((ADC_PARAM_BLOCK_DA_CH1 <= block_id) &&
+                 (ADC_PARAM_BLOCK_DA_CH4 >= block_id))
+        {
+            write_status = adc_tcp_server_apply_dac_param(block_id,
+                                                          block->data,
+                                                          block->len);
+        }
         else
         {
-            //尝试当作网络参数处理
+            // 尝试当作网络参数处理
             write_status = adc_tcp_server_apply_network_param(block_id,
                                                               block->data,
                                                               block->len);
         }
 
-        //回复写入结果
+        // 回复写入结果
         (void)adc_tcp_server_send_write_status(tpcb,
                                                block_id,
                                                write_status);
@@ -1057,16 +1181,16 @@ static void adc_tcp_server_handle_frame(struct tcp_pcb *tpcb,
             return;
         }
 
-        //计算响应长度
+        // 计算响应长度
         response_len = (uint16_t)(block->len + 2U);
-        //检查响应长度是否超过协议最大 payload
+        // 检查响应长度是否超过协议最大 payload
         if (response_len > ADC_PROTO_MAX_PAYLOAD_SIZE)
         {
             SEGGER_RTT_WriteString(0, "read param too long\r\n");
             return;
         }
 
-        //填充响应 payload
+        // 填充响应 payload
         response_payload[0] = (uint8_t)(block_id >> 8);
         response_payload[1] = (uint8_t)(block_id & 0xFFU);
         if (block->len > 0U)
@@ -1074,7 +1198,7 @@ static void adc_tcp_server_handle_frame(struct tcp_pcb *tpcb,
             memcpy(&response_payload[2], block->data, block->len);
         }
 
-        //发送读参数响应8
+        // 发送读参数响应8
 
         (void)adc_tcp_server_send_frame(tpcb,
                                         ADC_PROTO_CMD_READ_PARAM,
@@ -1180,7 +1304,7 @@ static void adc_tcp_server_pump_adc_stream(void)
             return;
         }
 
-        //raw 和 converted 每帧样本数不同,raw 12*2*32 converted 12*4*16
+        // raw 和 converted 每帧样本数不同,raw 12*2*32 converted 12*4*16
         if (ADC_STREAM_TYPE_CONVERTED == s_adc_stream_type)
         {
             max_sample_count = ADC_FRAME_CONVERTED_BATCH_GROUP_COUNT;
@@ -1193,7 +1317,7 @@ static void adc_tcp_server_pump_adc_stream(void)
         sample_count = 0U;
         while (sample_count < max_sample_count)
         {
-            //拿到了一组12通道样本
+            // 拿到了一组12通道样本
             if (0U == adc_acq_service_get_sample(&s_adc_stream_samples[sample_count]))
             {
                 break;
@@ -1250,7 +1374,7 @@ static void adc_tcp_server_pump_adc_stream(void)
             return;
         }
 
-        //发送外层协议帧
+        // 发送外层协议帧
         if (ERR_OK != adc_tcp_server_send_frame(s_client_pcb,
                                                 s_adc_stream_type,
                                                 s_adc_stream_payload,
@@ -1260,7 +1384,7 @@ static void adc_tcp_server_pump_adc_stream(void)
             return;
         }
 
-        //更新流序列号
+        // 更新流序列号
         s_adc_stream_seq += sample_count;
     }
 }
