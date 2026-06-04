@@ -26,7 +26,7 @@ FRAME_EOF_LEN = 2
 FRAME_OVERHEAD = FRAME_HEADER_LEN + FRAME_CRC_LEN + FRAME_EOF_LEN
 
 ADC_PAYLOAD_HEADER_LEN = 20
-ADC_FRAME_MAGIC = 0x31434441
+ADC_FRAME_MAGIC = 0x41444331
 SCRIPT_VERSION = "2026-06-03-batch-seq-v2"
 
 
@@ -97,7 +97,7 @@ def parse_adc_payload(payload: bytes, cmd: int):
         return None
 
     magic, seq, timestamp_us, channel_mask, channel_count, sample_format, payload_bytes = struct.unpack_from(
-        "<IIIHHHH", payload, 0
+        ">IIIHHHH", payload, 0
     )
 
     if magic != ADC_FRAME_MAGIC:
@@ -114,7 +114,7 @@ def parse_adc_payload(payload: bytes, cmd: int):
     elif cmd == CMD_CONVERTED_DATA:
         for i in range(0, len(data), 4):
             if i + 3 < len(data):
-                values.append(struct.unpack_from("<f", data, i)[0])
+                values.append(struct.unpack_from(">f", data, i)[0])
         bytes_per_group = channel_count * 4
     else:
         bytes_per_group = 0

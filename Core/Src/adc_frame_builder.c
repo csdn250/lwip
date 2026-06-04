@@ -2,6 +2,34 @@
 
 #include <string.h>
 
+static void adc_frame_builder_put_u16_be(uint8_t *buf,
+                                         uint16_t *offset,
+                                         uint16_t value)
+{
+    buf[(*offset)++] = (uint8_t)(value >> 8);
+    buf[(*offset)++] = (uint8_t)(value & 0xFFU);
+}
+
+static void adc_frame_builder_put_u32_be(uint8_t *buf,
+                                         uint16_t *offset,
+                                         uint32_t value)
+{
+    buf[(*offset)++] = (uint8_t)(value >> 24);
+    buf[(*offset)++] = (uint8_t)(value >> 16);
+    buf[(*offset)++] = (uint8_t)(value >> 8);
+    buf[(*offset)++] = (uint8_t)(value & 0xFFU);
+}
+
+static void adc_frame_builder_put_float_be(uint8_t *buf,
+                                           uint16_t *offset,
+                                           float value)
+{
+    uint32_t bits;
+
+    memcpy(&bits, &value, sizeof(bits));
+    adc_frame_builder_put_u32_be(buf, offset, bits);
+}
+
 static uint8_t adc_frame_builder_count_channels(uint16_t channel_mask)
 {
     uint8_t count = 0U;
@@ -25,7 +53,6 @@ uint16_t adc_frame_builder_build_raw_u16_batch(const adc_acq_sample_t *samples,
                                                uint8_t *out_buf,
                                                uint16_t out_buf_size)
 {
-    adc_frame_header_t header;
     uint16_t sample_index;
     uint8_t ch;
     uint8_t channel_count;
@@ -53,17 +80,14 @@ uint16_t adc_frame_builder_build_raw_u16_batch(const adc_acq_sample_t *samples,
         return 0U;
     }
 
-    header.magic = ADC_FRAME_MAGIC;
-    header.seq = first_seq;
-    header.timestamp_us = samples[0].timestamp_us;
-    header.channel_mask = channel_mask;
-    header.channel_count = channel_count;
-    header.sample_format = ADC_FRAME_FORMAT_RAW_U16;
-    header.payload_bytes = payload_bytes;
-
-    memcpy(out_buf, &header, sizeof(header));
-
-    offset = ADC_FRAME_HEADER_BYTES;
+    offset = 0U;
+    adc_frame_builder_put_u32_be(out_buf, &offset, ADC_FRAME_MAGIC);
+    adc_frame_builder_put_u32_be(out_buf, &offset, first_seq);
+    adc_frame_builder_put_u32_be(out_buf, &offset, samples[0].timestamp_us);
+    adc_frame_builder_put_u16_be(out_buf, &offset, channel_mask);
+    adc_frame_builder_put_u16_be(out_buf, &offset, channel_count);
+    adc_frame_builder_put_u16_be(out_buf, &offset, ADC_FRAME_FORMAT_RAW_U16);
+    adc_frame_builder_put_u16_be(out_buf, &offset, payload_bytes);
 
     /* Payload order: sample0 CH1..CH12, sample1 CH1..CH12, ... */
     for (sample_index = 0U; sample_index < sample_count; sample_index++)
@@ -73,10 +97,7 @@ uint16_t adc_frame_builder_build_raw_u16_batch(const adc_acq_sample_t *samples,
             if (0U != (channel_mask & (1U << ch)))
             {
                 value = samples[sample_index].raw[ch];
-
-                out_buf[offset] = (uint8_t)(value >> 8);
-                out_buf[offset + 1U] = (uint8_t)(value & 0xFFU);
-                offset = (uint16_t)(offset + sizeof(uint16_t));
+                adc_frame_builder_put_u16_be(out_buf, &offset, value);
             }
         }
     }
@@ -92,7 +113,6 @@ uint16_t adc_frame_builder_build_cal_float_batch(const adc_acq_sample_t *samples
                                                  uint8_t *out_buf,
                                                  uint16_t out_buf_size)
 {
-    adc_frame_header_t header;
     uint16_t sample_index;
     uint8_t ch;
     uint8_t channel_count;
@@ -124,17 +144,14 @@ uint16_t adc_frame_builder_build_cal_float_batch(const adc_acq_sample_t *samples
         return 0U;
     }
 
-    header.magic = ADC_FRAME_MAGIC;
-    header.seq = first_seq;
-    header.timestamp_us = samples[0].timestamp_us;
-    header.channel_mask = channel_mask;
-    header.channel_count = channel_count;
-    header.sample_format = ADC_FRAME_FORMAT_CAL_FLOAT;
-    header.payload_bytes = payload_bytes;
-
-    memcpy(out_buf, &header, sizeof(header));
-
-    offset = ADC_FRAME_HEADER_BYTES;
+    offset = 0U;
+    adc_frame_builder_put_u32_be(out_buf, &offset, ADC_FRAME_MAGIC);
+    adc_frame_builder_put_u32_be(out_buf, &offset, first_seq);
+    adc_frame_builder_put_u32_be(out_buf, &offset, samples[0].timestamp_us);
+    adc_frame_builder_put_u16_be(out_buf, &offset, channel_mask);
+    adc_frame_builder_put_u16_be(out_buf, &offset, channel_count);
+    adc_frame_builder_put_u16_be(out_buf, &offset, ADC_FRAME_FORMAT_CAL_FLOAT);
+    adc_frame_builder_put_u16_be(out_buf, &offset, payload_bytes);
 
     /*
      * Calibration format:
@@ -150,9 +167,7 @@ uint16_t adc_frame_builder_build_cal_float_batch(const adc_acq_sample_t *samples
                 k = (float)cal_config->ch[ch].k_raw * DEVICE_CONFIG_ADC_CAL_K_SCALE;
                 value = ((float)samples[sample_index].raw[ch] * k) +
                         (float)cal_config->ch[ch].b_raw;
-
-                memcpy(&out_buf[offset], &value, sizeof(value));
-                offset = (uint16_t)(offset + sizeof(value));
+                adc_frame_builder_put_float_be(out_buf, &offset, value);
             }
         }
     }

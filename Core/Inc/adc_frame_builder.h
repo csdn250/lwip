@@ -5,7 +5,7 @@
 #include "adc_acq_service.h"
 #include "device_config.h"
 
-#define ADC_FRAME_MAGIC 0x31434441U
+#define ADC_FRAME_MAGIC 0x41444331U
 #define ADC_FRAME_MAX_CHANNEL_COUNT ADC_ACQ_CHANNEL_COUNT
 
 /* One TCP data payload can contain several 12-channel sample groups. */
@@ -35,13 +35,17 @@ typedef enum
  * This header lives inside the outer TCP protocol payload:
  *   12 34 CMD LEN PAYLOAD CRC32 56 78
  *
+ * All multi-byte fields in this payload are big-endian.
+ *
+ * magic         Fixed ADC payload marker.
  * seq           First sample sequence number in this payload.
  * timestamp_us  Currently mirrors the sample sequence for debug.
- * channel_mask  Bit mask of enabled channels.
+ * channel_mask  Bit mask of enabled channels. 0x0FFF means CH1..CH12.
  * channel_count Number of channels in each sample group.
  * sample_format 0x81 raw uint16, 0x82 calibrated float.
  * payload_bytes Bytes after this header.
  */
+
 #pragma pack(push, 1)
 typedef struct
 {
