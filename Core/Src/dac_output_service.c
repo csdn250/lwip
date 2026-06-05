@@ -190,7 +190,7 @@ static uint16_t dac_output_service_cascade_to_code(uint16_t adc_raw,
 
     adc_value = ((float)adc_raw *
                  ((float)adc_cal->k_raw * DEVICE_CONFIG_ADC_CAL_K_SCALE)) +
-                (float)adc_cal->b_raw;
+                ((float)adc_cal->b_raw * DEVICE_CONFIG_ADC_CAL_B_SCALE);
 
     dac_value = (adc_value *
                  ((float)dac_config->k_raw * DEVICE_CONFIG_DAC_CAL_K_SCALE)) +

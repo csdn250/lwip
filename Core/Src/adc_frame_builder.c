@@ -166,7 +166,7 @@ uint16_t adc_frame_builder_build_cal_float_batch(const adc_acq_sample_t *samples
             {
                 k = (float)cal_config->ch[ch].k_raw * DEVICE_CONFIG_ADC_CAL_K_SCALE;
                 value = ((float)samples[sample_index].raw[ch] * k) +
-                        (float)cal_config->ch[ch].b_raw;
+                        ((float)cal_config->ch[ch].b_raw * DEVICE_CONFIG_ADC_CAL_B_SCALE);
                 adc_frame_builder_put_float_be(out_buf, &offset, value);
             }
         }
