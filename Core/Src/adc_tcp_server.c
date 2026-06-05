@@ -122,6 +122,16 @@ static err_t adc_tcp_server_send_frame(struct tcp_pcb *tpcb,
 static void adc_tcp_server_apply_control_param(const uint8_t *data,
                                                uint16_t len);
 
+static void adc_tcp_server_update_sndbuf_min(uint16_t sndbuf_now);
+
+static uint8_t adc_tcp_server_can_send_bytes(uint16_t need_len);
+
+static uint16_t adc_tcp_server_collect_stream_samples(uint16_t max_sample_count);
+
+static uint16_t adc_tcp_server_build_stream_payload(uint16_t sample_count);
+
+static uint16_t adc_tcp_server_get_stream_batch_count(void);
+
 static void adc_tcp_server_pump_adc_stream(void);
 
 static void adc_tcp_server_parse_rx(struct tcp_pcb *tpcb);
@@ -725,13 +735,95 @@ static void adc_tcp_server_send_debug_status(void)
                                     index);
 }
 
+static void adc_tcp_server_update_sndbuf_min(uint16_t sndbuf_now)
+{
+    if ((0U == s_tcp_sndbuf_min) || (sndbuf_now < s_tcp_sndbuf_min))
+    {
+        s_tcp_sndbuf_min = sndbuf_now;
+    }
+}
+
+static uint8_t adc_tcp_server_can_send_bytes(uint16_t need_len)
+{
+    uint16_t sndbuf_now;
+
+    if (NULL == s_client_pcb)
+    {
+        return 0U;
+    }
+
+    sndbuf_now = tcp_sndbuf(s_client_pcb);
+    adc_tcp_server_update_sndbuf_min(sndbuf_now);
+
+    if (sndbuf_now < (uint16_t)(need_len + ADC_STREAM_TCP_SEND_MARGIN))
+    {
+        return 0U;
+    }
+
+    return 1U;
+}
+
+static uint16_t adc_tcp_server_collect_stream_samples(uint16_t max_sample_count)
+{
+    uint16_t sample_count = 0U;
+
+    while (sample_count < max_sample_count)
+    {
+        if (0U == adc_acq_service_get_sample(&s_adc_stream_samples[sample_count]))
+        {
+            break;
+        }
+
+        /*
+         * ADC-to-DAC cascade must use the same fresh sample that is about
+         * to be sent. The DAC service decides whether each channel is in
+         * manual mode or cascade mode.
+         */
+        dac_output_service_apply_adc_sample(&s_adc_stream_samples[sample_count]);
+
+        sample_count++;
+    }
+
+    return sample_count;
+}
+
+static uint16_t adc_tcp_server_build_stream_payload(uint16_t sample_count)
+{
+    if (ADC_STREAM_TYPE_CONVERTED == s_adc_stream_type)
+    {
+        return adc_frame_builder_build_cal_float_batch(s_adc_stream_samples,
+                                                       sample_count,
+                                                       s_adc_stream_seq,
+                                                       0x0FFFU,
+                                                       device_config_get_adc_calibration(),
+                                                       s_adc_stream_payload,
+                                                       sizeof(s_adc_stream_payload));
+    }
+
+    return adc_frame_builder_build_raw_u16_batch(s_adc_stream_samples,
+                                                 sample_count,
+                                                 s_adc_stream_seq,
+                                                 0x0FFFU,
+                                                 s_adc_stream_payload,
+                                                 sizeof(s_adc_stream_payload));
+}
+
+static uint16_t adc_tcp_server_get_stream_batch_count(void)
+{
+    if (ADC_STREAM_TYPE_CONVERTED == s_adc_stream_type)
+    {
+        return ADC_FRAME_CONVERTED_BATCH_GROUP_COUNT;
+    }
+
+    return ADC_FRAME_BATCH_GROUP_COUNT;
+}
+
 static void adc_tcp_server_pump_adc_stream(void)
 {
     uint16_t payload_len;
     uint16_t frame_len;
     uint8_t frame_count;
     uint16_t sample_count;
-    uint16_t sndbuf_now;
     uint16_t max_sample_count;
 
     if (NULL == s_client_pcb)
@@ -740,69 +832,27 @@ static void adc_tcp_server_pump_adc_stream(void)
         return;
     }
 
+    max_sample_count = adc_tcp_server_get_stream_batch_count();
+
     for (frame_count = 0U;
          frame_count < ADC_STREAM_MAX_FRAMES_PER_PUMP;
          frame_count++)
     {
-        sndbuf_now = tcp_sndbuf(s_client_pcb);
-
-        if ((0U == s_tcp_sndbuf_min) || (sndbuf_now < s_tcp_sndbuf_min))
-        {
-            s_tcp_sndbuf_min = sndbuf_now;
-        }
-
-        if (sndbuf_now < (uint16_t)(ADC_FRAME_MAX_BYTES + ADC_PROTO_FRAME_OVERHEAD + ADC_STREAM_TCP_SEND_MARGIN))
+        if (0U == adc_tcp_server_can_send_bytes((uint16_t)(ADC_FRAME_MAX_BYTES +
+                                                           ADC_PROTO_FRAME_OVERHEAD)))
         {
             return;
         }
 
         // raw 和 converted 每帧样本数不同,raw 12*2*32 converted 12*4*16
-        if (ADC_STREAM_TYPE_CONVERTED == s_adc_stream_type)
-        {
-            max_sample_count = ADC_FRAME_CONVERTED_BATCH_GROUP_COUNT;
-        }
-        else
-        {
-            max_sample_count = ADC_FRAME_BATCH_GROUP_COUNT;
-        }
-
-        sample_count = 0U;
-        while (sample_count < max_sample_count)
-        {
-            // 拿到了一组12通道样本
-            if (0U == adc_acq_service_get_sample(&s_adc_stream_samples[sample_count]))
-            {
-                break;
-            }
-
-            dac_output_service_apply_adc_sample(&s_adc_stream_samples[sample_count]);
-            sample_count++;
-        }
+        sample_count = adc_tcp_server_collect_stream_samples(max_sample_count);
 
         if (0U == sample_count)
         {
             return;
         }
 
-        if (ADC_STREAM_TYPE_CONVERTED == s_adc_stream_type)
-        {
-            payload_len = adc_frame_builder_build_cal_float_batch(s_adc_stream_samples,
-                                                                  sample_count,
-                                                                  s_adc_stream_seq,
-                                                                  0x0FFFU,
-                                                                  device_config_get_adc_calibration(),
-                                                                  s_adc_stream_payload,
-                                                                  sizeof(s_adc_stream_payload));
-        }
-        else
-        {
-            payload_len = adc_frame_builder_build_raw_u16_batch(s_adc_stream_samples,
-                                                                sample_count,
-                                                                s_adc_stream_seq,
-                                                                0x0FFFU,
-                                                                s_adc_stream_payload,
-                                                                sizeof(s_adc_stream_payload));
-        }
+        payload_len = adc_tcp_server_build_stream_payload(sample_count);
 
         if (0U == payload_len)
         {
@@ -815,14 +865,7 @@ static void adc_tcp_server_pump_adc_stream(void)
          */
         frame_len = (uint16_t)(payload_len + ADC_PROTO_FRAME_OVERHEAD);
 
-        sndbuf_now = tcp_sndbuf(s_client_pcb);
-
-        if ((0U == s_tcp_sndbuf_min) || (sndbuf_now < s_tcp_sndbuf_min))
-        {
-            s_tcp_sndbuf_min = sndbuf_now;
-        }
-
-        if (sndbuf_now < (uint16_t)(frame_len + ADC_STREAM_TCP_SEND_MARGIN))
+        if (0U == adc_tcp_server_can_send_bytes(frame_len))
         {
             return;
         }
