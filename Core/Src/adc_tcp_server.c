@@ -852,7 +852,7 @@ static uint8_t adc_tcp_server_apply_cal_param(const uint8_t *data,
         cal.ch[ch].b_raw = adc_tcp_server_get_i32_be(data, &index);
     }
 
-    ddevice_config_set_adc_calibration(&cal);
+    device_config_set_adc_calibration(&cal);
     adc_tcp_server_sync_param_blocks_from_config();
 
     if (HAL_OK == device_config_save_all())
