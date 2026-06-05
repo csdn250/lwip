@@ -60,8 +60,9 @@ const device_network_config_t *device_config_get_network(void);
 void device_config_set_network(const device_network_config_t *config);
 
 HAL_StatusTypeDef device_config_save_network(void);
-
 HAL_StatusTypeDef device_config_load_network(void);
+HAL_StatusTypeDef device_config_save_all(void);
+HAL_StatusTypeDef device_config_load_all(void);
 
 const device_adc_cal_config_t *device_config_get_adc_calibration(void);
 

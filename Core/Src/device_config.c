@@ -5,7 +5,7 @@
 
 #define DEVICE_CONFIG_EEPROM_ADDR 0x0000U
 #define DEVICE_CONFIG_MAGIC 0x41444346UL
-#define DEVICE_CONFIG_VERSION 1U
+#define DEVICE_CONFIG_VERSION 2U
 
 typedef struct
 {
@@ -13,6 +13,8 @@ typedef struct
     uint16_t version;
     uint16_t length;
     device_network_config_t network;
+    device_adc_cal_config_t adc_cal;
+    device_dac_config_t dac;
     uint32_t crc32;
 } device_config_record_t;
 
@@ -117,7 +119,7 @@ void device_config_set_dac_config(const device_dac_config_t *config)
     memcpy(&s_dac_config, config, sizeof(s_dac_config));
 }
 
-HAL_StatusTypeDef device_config_save_network(void)
+HAL_StatusTypeDef device_config_save_all(void)
 {
     device_config_record_t record;
     uint16_t crc_len;
@@ -131,8 +133,13 @@ HAL_StatusTypeDef device_config_save_network(void)
 
     record.magic = DEVICE_CONFIG_MAGIC;
     record.version = DEVICE_CONFIG_VERSION;
-    record.length = sizeof(record.network);
+    record.length = (uint16_t)(sizeof(record.network) +
+                               sizeof(record.adc_cal) +
+                               sizeof(record.dac));
+
     memcpy(&record.network, &s_network_config, sizeof(record.network));
+    memcpy(&record.adc_cal, &s_adc_cal_config, sizeof(record.adc_cal));
+    memcpy(&record.dac, &s_dac_config, sizeof(record.dac));
 
     crc_len = (uint16_t)(sizeof(record) - sizeof(record.crc32));
     record.crc32 = device_config_crc32((const uint8_t *)&record, crc_len);
@@ -140,6 +147,11 @@ HAL_StatusTypeDef device_config_save_network(void)
     return eeprom_storage_write(DEVICE_CONFIG_EEPROM_ADDR,
                                 (const uint8_t *)&record,
                                 sizeof(record));
+}
+
+HAL_StatusTypeDef device_config_save_network(void)
+{
+    return device_config_save_all();
 }
 
 static uint32_t device_config_crc32(const uint8_t *data, uint16_t len)
@@ -168,7 +180,7 @@ static uint32_t device_config_crc32(const uint8_t *data, uint16_t len)
     return crc ^ 0xFFFFFFFFUL;
 }
 
-HAL_StatusTypeDef device_config_load_network(void)
+HAL_StatusTypeDef device_config_load_all(void)
 {
     device_config_record_t record;
     uint16_t crc_len;
@@ -196,7 +208,9 @@ HAL_StatusTypeDef device_config_load_network(void)
         return HAL_ERROR;
     }
 
-    if (sizeof(record.network) != record.length)
+    if ((uint16_t)(sizeof(record.network) +
+                   sizeof(record.adc_cal) +
+                   sizeof(record.dac)) != record.length)
     {
         return HAL_ERROR;
     }
@@ -210,6 +224,13 @@ HAL_StatusTypeDef device_config_load_network(void)
     }
 
     memcpy(&s_network_config, &record.network, sizeof(s_network_config));
+    memcpy(&s_adc_cal_config, &record.adc_cal, sizeof(s_adc_cal_config));
+    memcpy(&s_dac_config, &record.dac, sizeof(s_dac_config));
 
     return HAL_OK;
+}
+
+HAL_StatusTypeDef device_config_load_network(void)
+{
+    return device_config_load_all();
 }

@@ -852,9 +852,17 @@ static uint8_t adc_tcp_server_apply_cal_param(const uint8_t *data,
         cal.ch[ch].b_raw = adc_tcp_server_get_i32_be(data, &index);
     }
 
-    device_config_set_adc_calibration(&cal);
+    ddevice_config_set_adc_calibration(&cal);
+    adc_tcp_server_sync_param_blocks_from_config();
 
-    return ADC_PROTO_WRITE_STATUS_OK;
+    if (HAL_OK == device_config_save_all())
+    {
+        SEGGER_RTT_WriteString(0, "cal param saved\r\n");
+        return ADC_PROTO_WRITE_STATUS_OK;
+    }
+
+    SEGGER_RTT_WriteString(0, "cal param save pending\r\n");
+    return ADC_PROTO_WRITE_STATUS_SAVE_PENDING;
 }
 
 static uint8_t adc_tcp_server_apply_dac_param(uint16_t block_id,
@@ -910,7 +918,14 @@ static uint8_t adc_tcp_server_apply_dac_param(uint16_t block_id,
 
     SEGGER_RTT_WriteString(0, "dac param applied\r\n");
 
-    return ADC_PROTO_WRITE_STATUS_OK;
+    if (HAL_OK == device_config_save_all())
+    {
+        SEGGER_RTT_WriteString(0, "dac param saved\r\n");
+        return ADC_PROTO_WRITE_STATUS_OK;
+    }
+
+    SEGGER_RTT_WriteString(0, "dac param save pending\r\n");
+    return ADC_PROTO_WRITE_STATUS_SAVE_PENDING;
 }
 
 static uint8_t adc_tcp_server_apply_network_param(uint16_t block_id,

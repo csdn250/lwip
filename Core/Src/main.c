@@ -47,7 +47,7 @@ int main(void)
   MX_TIM6_Init();
   MX_I2C2_Init();
   eeprom_storage_init();
-  if (HAL_OK == device_config_load_network())
+  if (HAL_OK == device_config_load_all())
   {
     SEGGER_RTT_WriteString(0, "device config loaded\r\n");
   }
