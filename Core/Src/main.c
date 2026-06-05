@@ -15,6 +15,7 @@
 #include "eeprom_storage.h"
 #include "device_config.h"
 #include "udp_discovery.h"
+#include "dac_output_service.h"
 
 void SystemClock_Config(void);
 void PeriphCommonClock_Config(void);
@@ -67,6 +68,7 @@ int main(void)
 
   adc_acq_service_init();
   adc_acq_service_start();
+  dac_output_service_init();
 
   while (1)
   {
@@ -75,6 +77,18 @@ int main(void)
 
     /* TCP handles command parsing and ADC data streaming. */
     adc_tcp_server_process();
+
+    dac_output_service_process();
+
+    /*
+     * DAC ADC-cascade mode is enabled by DA parameter blocks 0x0009~0x000C.
+     * When TCP ADC streaming is off, DAC service consumes ADC samples itself.
+     * When TCP ADC streaming is on, TCP pump feeds samples to DAC to avoid double-consuming samples.
+     */
+    if (0U == adc_tcp_server_is_streaming())
+    {
+      dac_output_service_process_adc_cascade();
+    }
 
     /* UDP broadcasts device info only when no TCP client is connected. */
     udp_discovery_process();

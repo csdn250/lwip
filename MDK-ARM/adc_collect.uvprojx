@@ -586,6 +586,11 @@
               <FileType>1</FileType>
               <FilePath>..\Core\Src\udp_discovery.c</FilePath>
             </File>
+            <File>
+              <FileName>dac_output_service.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Core\Src\dac_output_service.c</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>

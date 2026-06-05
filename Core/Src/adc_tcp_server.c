@@ -6,6 +6,7 @@
 #include "lwip/tcp.h"
 #include "device_config.h"
 #include "adc_frame_builder.h"
+#include "dac_output_service.h"
 
 #include <string.h>
 
@@ -333,6 +334,11 @@ void adc_tcp_server_process(void)
 uint8_t adc_tcp_server_has_client(void)
 {
     return (NULL != s_client_pcb) ? 1U : 0U;
+}
+
+uint8_t adc_tcp_server_is_streaming(void)
+{
+    return (0U != s_adc_stream_enabled) ? 1U : 0U;
 }
 
 uint8_t adc_tcp_server_is_network_config_dirty(void)
@@ -1323,6 +1329,7 @@ static void adc_tcp_server_pump_adc_stream(void)
                 break;
             }
 
+            dac_output_service_apply_adc_sample(&s_adc_stream_samples[sample_count]);
             sample_count++;
         }
 
