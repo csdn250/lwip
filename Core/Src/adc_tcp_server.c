@@ -122,6 +122,14 @@ static err_t adc_tcp_server_send_frame(struct tcp_pcb *tpcb,
 static void adc_tcp_server_apply_control_param(const uint8_t *data,
                                                uint16_t len);
 
+static uint8_t adc_tcp_server_normalize_stream_type(uint8_t stream_type);
+
+static void adc_tcp_server_start_stream(uint8_t stream_type);
+
+static void adc_tcp_server_stop_stream(void);
+
+static void adc_tcp_server_disable_stream(void);
+
 static void adc_tcp_server_update_sndbuf_min(uint16_t sndbuf_now);
 
 static uint8_t adc_tcp_server_can_send_bytes(uint16_t need_len);
@@ -242,7 +250,7 @@ static err_t adc_tcp_server_accept(void *arg,
 
     s_client_pcb = newpcb;
     s_tcp_sndbuf_min = tcp_sndbuf(newpcb);
-    s_adc_stream_enabled = 0U;
+    adc_tcp_server_disable_stream();
     s_rx_len = 0U;
 
     tcp_arg(newpcb, NULL);
@@ -289,7 +297,7 @@ static void adc_tcp_server_error(void *arg, err_t err)
     LWIP_UNUSED_ARG(err);
 
     s_client_pcb = NULL;
-    s_adc_stream_enabled = 0U;
+    adc_tcp_server_disable_stream();
     s_rx_len = 0U;
 }
 
@@ -310,7 +318,7 @@ static void adc_tcp_server_close_client(struct tcp_pcb *tpcb)
     if (tpcb == s_client_pcb)
     {
         s_client_pcb = NULL;
-        s_adc_stream_enabled = 0U;
+        adc_tcp_server_disable_stream();
         s_rx_len = 0U;
     }
 
@@ -439,6 +447,37 @@ static err_t adc_tcp_server_send_write_status(struct tcp_pcb *tpcb,
                                      sizeof(payload));
 }
 
+static uint8_t adc_tcp_server_normalize_stream_type(uint8_t stream_type)
+{
+    if (ADC_STREAM_TYPE_CONVERTED == stream_type)
+    {
+        return ADC_STREAM_TYPE_CONVERTED;
+    }
+
+    return ADC_STREAM_TYPE_RAW;
+}
+
+static void adc_tcp_server_start_stream(uint8_t stream_type)
+{
+    s_adc_stream_type = adc_tcp_server_normalize_stream_type(stream_type);
+    s_adc_stream_seq = 0U;
+    s_adc_stream_enabled = 1U;
+
+    SEGGER_RTT_WriteString(0, "adc stream start\r\n");
+}
+
+static void adc_tcp_server_stop_stream(void)
+{
+    adc_tcp_server_disable_stream();
+
+    SEGGER_RTT_WriteString(0, "adc stream stop\r\n");
+}
+
+static void adc_tcp_server_disable_stream(void)
+{
+    s_adc_stream_enabled = 0U;
+}
+
 static void adc_tcp_server_apply_control_param(const uint8_t *data,
                                                uint16_t len)
 {
@@ -449,25 +488,11 @@ static void adc_tcp_server_apply_control_param(const uint8_t *data,
 
     if (0U != data[0])
     {
-        s_adc_stream_enabled = 1U;
-
-        if (ADC_STREAM_TYPE_CONVERTED == data[1])
-        {
-            s_adc_stream_type = ADC_STREAM_TYPE_CONVERTED;
-        }
-        else
-        {
-            s_adc_stream_type = ADC_STREAM_TYPE_RAW;
-        }
-
-        // 启动时清零方便上位机判断
-        s_adc_stream_seq = 0U;
-        SEGGER_RTT_WriteString(0, "adc stream start\r\n");
+        adc_tcp_server_start_stream(data[1]);
     }
     else
     {
-        s_adc_stream_enabled = 0U;
-        SEGGER_RTT_WriteString(0, "adc stream stop\r\n");
+        adc_tcp_server_stop_stream();
     }
 }
 
@@ -828,7 +853,7 @@ static void adc_tcp_server_pump_adc_stream(void)
 
     if (NULL == s_client_pcb)
     {
-        s_adc_stream_enabled = 0U;
+        adc_tcp_server_disable_stream();
         return;
     }
 
