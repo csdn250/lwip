@@ -5,6 +5,7 @@
 #include "lwip/pbuf.h"
 #include "lwip/tcp.h"
 #include "device_config.h"
+#include "adc_proto.h"
 #include "adc_frame_builder.h"
 #include "dac_output_service.h"
 
@@ -27,11 +28,6 @@
 
 #define ADC_TCP_SERVER_PORT 8080U
 
-#define ADC_PROTO_SOF0 0x12U
-#define ADC_PROTO_SOF1 0x34U
-#define ADC_PROTO_EOF0 0x56U
-#define ADC_PROTO_EOF1 0x78U
-
 // cmd pc send to mcu
 #define ADC_PROTO_CMD_WRITE_PARAM 0x01U
 #define ADC_PROTO_CMD_READ_PARAM 0x02U
@@ -46,14 +42,6 @@
 /* 0x81/0x82 are reserved by the protocol document for ADC data stream frames. */
 #define ADC_PROTO_RSP_RAW_DATA 0x81U
 #define ADC_PROTO_RSP_CONVERTED_DATA 0x82U
-
-/* Frame: SOF(2) + CMD(1) + LEN(2) + PAYLOAD(n) + CRC32(4) + EOF(2) */
-#define ADC_PROTO_HEADER_SIZE 5U
-#define ADC_PROTO_CRC_SIZE 4U
-#define ADC_PROTO_EOF_SIZE 2U
-#define ADC_PROTO_TAIL_SIZE (ADC_PROTO_CRC_SIZE + ADC_PROTO_EOF_SIZE)
-#define ADC_PROTO_FRAME_OVERHEAD (ADC_PROTO_HEADER_SIZE + ADC_PROTO_TAIL_SIZE)
-#define ADC_PROTO_MIN_FRAME_SIZE ADC_PROTO_FRAME_OVERHEAD
 
 #define ADC_TCP_RX_BUF_SIZE 1500U
 #define ADC_PROTO_MAX_PAYLOAD_SIZE (ADC_TCP_RX_BUF_SIZE - ADC_PROTO_FRAME_OVERHEAD)
@@ -218,12 +206,6 @@ static void adc_tcp_server_drop_one_rx_byte(void);
 static void adc_tcp_server_remove_frame(uint16_t frame_len);
 
 /* Protocol helpers */
-static uint32_t adc_proto_crc32(const uint8_t *data, uint16_t len);
-
-static uint8_t adc_proto_is_frame_valid(const uint8_t *frame,
-                                        uint16_t frame_len);
-
-static uint16_t adc_proto_payload_len(const uint8_t *frame);
 
 static err_t adc_tcp_server_send_frame(struct tcp_pcb *tpcb,
                                        uint8_t cmd,
@@ -242,9 +224,6 @@ static uint8_t adc_tcp_server_apply_cal_param(const uint8_t *data,
 static uint8_t adc_tcp_server_apply_dac_param(uint16_t block_id,
                                               const uint8_t *data,
                                               uint16_t len);
-
-static int32_t adc_tcp_server_get_i32_be(const uint8_t *buf,
-                                         uint16_t *index);
 
 static void adc_tcp_server_apply_control_param(const uint8_t *data,
                                                uint16_t len);
@@ -268,14 +247,6 @@ static uint8_t adc_tcp_server_check_write_param_len(uint16_t block_id,
                                                     uint16_t len);
 
 static void adc_tcp_server_send_debug_status(void);
-
-static void adc_tcp_server_put_u32(uint8_t *buf,
-                                   uint16_t *index,
-                                   uint32_t value);
-
-static void adc_tcp_server_put_u16(uint8_t *buf,
-                                   uint16_t *index,
-                                   uint16_t value);
 
 static void adc_tcp_server_sync_dac_param_block(uint8_t *buf,
                                                 const device_dac_channel_config_t *config);
@@ -491,82 +462,6 @@ static void adc_tcp_server_remove_frame(uint16_t frame_len)
 
 /* =========================== Protocol Parser =========================== */
 
-static uint32_t adc_proto_crc32(const uint8_t *data, uint16_t len)
-{
-    uint32_t crc = 0xFFFFFFFFUL;
-    uint16_t i;
-    uint8_t bit;
-
-    for (i = 0U; i < len; i++)
-    {
-        crc ^= data[i];
-
-        for (bit = 0U; bit < 8U; bit++)
-        {
-            if ((crc & 1UL) != 0UL)
-            {
-                crc = (crc >> 1) ^ 0xEDB88320UL;
-            }
-            else
-            {
-                crc >>= 1;
-            }
-        }
-    }
-
-    return crc ^ 0xFFFFFFFFUL;
-}
-
-static uint16_t adc_proto_payload_len(const uint8_t *frame)
-{
-    return (uint16_t)(((uint16_t)frame[3] << 8) | frame[4]);
-}
-
-static uint8_t adc_proto_is_frame_valid(const uint8_t *frame,
-                                        uint16_t frame_len)
-{
-    uint16_t payload_len;
-    uint16_t crc_len;
-    uint32_t crc_calc;
-    uint32_t crc_recv;
-
-    if (frame_len < ADC_PROTO_MIN_FRAME_SIZE)
-    {
-        return 0U;
-    }
-
-    if ((frame[0] != ADC_PROTO_SOF0) || (frame[1] != ADC_PROTO_SOF1))
-    {
-        return 0U;
-    }
-
-    if ((frame[frame_len - 2U] != ADC_PROTO_EOF0) ||
-        (frame[frame_len - 1U] != ADC_PROTO_EOF1))
-    {
-        return 0U;
-    }
-
-    payload_len = adc_proto_payload_len(frame);
-    if (payload_len > ADC_PROTO_MAX_PAYLOAD_SIZE)
-    {
-        return 0U;
-    }
-
-    if (frame_len != (uint16_t)(payload_len + ADC_PROTO_FRAME_OVERHEAD))
-    {
-        return 0U;
-    }
-
-    crc_len = (uint16_t)(ADC_PROTO_HEADER_SIZE + payload_len);
-    crc_calc = adc_proto_crc32(frame, crc_len);
-    crc_recv = ((uint32_t)frame[ADC_PROTO_HEADER_SIZE + payload_len] << 24) |
-               ((uint32_t)frame[ADC_PROTO_HEADER_SIZE + payload_len + 1U] << 16) |
-               ((uint32_t)frame[ADC_PROTO_HEADER_SIZE + payload_len + 2U] << 8) |
-               frame[ADC_PROTO_HEADER_SIZE + payload_len + 3U];
-
-    return (crc_calc == crc_recv) ? 1U : 0U;
-}
-
 static err_t adc_tcp_server_send_frame(struct tcp_pcb *tpcb,
                                        uint8_t cmd,
                                        const uint8_t *payload,
@@ -574,8 +469,6 @@ static err_t adc_tcp_server_send_frame(struct tcp_pcb *tpcb,
 {
     uint8_t *frame = s_tx_frame_buf;
     uint16_t frame_len;
-    uint16_t crc_len;
-    uint32_t crc;
     err_t err;
 
     if (NULL == tpcb)
@@ -601,26 +494,21 @@ static err_t adc_tcp_server_send_frame(struct tcp_pcb *tpcb,
     }
 
     /* Protocol frame: 12 34 CMD LEN_H LEN_L PAYLOAD CRC32 56 78. */
-    frame[0] = ADC_PROTO_SOF0;
-    frame[1] = ADC_PROTO_SOF1;
-    frame[2] = cmd;
-    frame[3] = (uint8_t)(payload_len >> 8);
-    frame[4] = (uint8_t)(payload_len & 0xFFU);
+    frame_len = adc_proto_build_frame(frame,
+                                      sizeof(s_tx_frame_buf),
+                                      cmd,
+                                      payload,
+                                      payload_len);
 
-    if (payload_len > 0U)
+    if (0U == frame_len)
     {
-        memcpy(&frame[ADC_PROTO_HEADER_SIZE], payload, payload_len);
+        return ERR_VAL;
     }
 
-    crc_len = (uint16_t)(ADC_PROTO_HEADER_SIZE + payload_len);
-    crc = adc_proto_crc32(frame, crc_len);
-
-    frame[ADC_PROTO_HEADER_SIZE + payload_len] = (uint8_t)(crc >> 24);
-    frame[ADC_PROTO_HEADER_SIZE + payload_len + 1U] = (uint8_t)(crc >> 16);
-    frame[ADC_PROTO_HEADER_SIZE + payload_len + 2U] = (uint8_t)(crc >> 8);
-    frame[ADC_PROTO_HEADER_SIZE + payload_len + 3U] = (uint8_t)(crc & 0xFFU);
-    frame[ADC_PROTO_HEADER_SIZE + payload_len + 4U] = ADC_PROTO_EOF0;
-    frame[ADC_PROTO_HEADER_SIZE + payload_len + 5U] = ADC_PROTO_EOF1;
+    if (tcp_sndbuf(tpcb) < frame_len)
+    {
+        return ERR_MEM;
+    }
 
     err = tcp_write(tpcb, frame, frame_len, TCP_WRITE_FLAG_COPY);
     if (ERR_OK != err)
@@ -660,18 +548,18 @@ static void adc_tcp_server_sync_dac_param_block(uint8_t *buf,
 
     buf[index++] = config->mode;
 
-    adc_tcp_server_put_u32(buf,
-                           &index,
-                           (uint32_t)config->manual_raw);
+    adc_proto_put_u32_be(buf,
+                         &index,
+                         (uint32_t)config->manual_raw);
 
     buf[index++] = config->adc_channel;
 
-    adc_tcp_server_put_u32(buf,
-                           &index,
-                           (uint32_t)config->b_raw);
-    adc_tcp_server_put_u32(buf,
-                           &index,
-                           (uint32_t)config->b_raw);
+    adc_proto_put_u32_be(buf,
+                         &index,
+                         (uint32_t)config->k_raw);
+    adc_proto_put_u32_be(buf,
+                         &index,
+                         (uint32_t)config->b_raw);
 }
 
 static void adc_tcp_server_sync_param_blocks_from_config(void)
@@ -699,22 +587,22 @@ static void adc_tcp_server_sync_param_blocks_from_config(void)
     index = 0U;
     for (ch = 0U; ch < DEVICE_CONFIG_ADC_CHANNEL_COUNT; ch++)
     {
-        adc_tcp_server_put_u32(s_param_cal_data,
-                               &index,
-                               (uint32_t)cal_cfg->ch[ch].k_raw);
-        adc_tcp_server_put_u32(s_param_cal_data,
-                               &index,
-                               (uint32_t)cal_cfg->ch[ch].b_raw);
-
-        adc_tcp_server_sync_dac_param_block(s_param_da_ch1,
-                                            &dac_cfg->ch[0]);
-        adc_tcp_server_sync_dac_param_block(s_param_da_ch2,
-                                            &dac_cfg->ch[1]);
-        adc_tcp_server_sync_dac_param_block(s_param_da_ch3,
-                                            &dac_cfg->ch[2]);
-        adc_tcp_server_sync_dac_param_block(s_param_da_ch4,
-                                            &dac_cfg->ch[3]);
+        adc_proto_put_u32_be(s_param_cal_data,
+                             &index,
+                             (uint32_t)cal_cfg->ch[ch].k_raw);
+        adc_proto_put_u32_be(s_param_cal_data,
+                             &index,
+                             (uint32_t)cal_cfg->ch[ch].b_raw);
     }
+
+    adc_tcp_server_sync_dac_param_block(s_param_da_ch1,
+                                        &dac_cfg->ch[0]);
+    adc_tcp_server_sync_dac_param_block(s_param_da_ch2,
+                                        &dac_cfg->ch[1]);
+    adc_tcp_server_sync_dac_param_block(s_param_da_ch3,
+                                        &dac_cfg->ch[2]);
+    adc_tcp_server_sync_dac_param_block(s_param_da_ch4,
+                                        &dac_cfg->ch[3]);
 }
 
 static err_t adc_tcp_server_send_write_status(struct tcp_pcb *tpcb,
@@ -817,21 +705,6 @@ static void adc_tcp_server_apply_control_param(const uint8_t *data,
     }
 }
 
-static int32_t adc_tcp_server_get_i32_be(const uint8_t *buf,
-                                         uint16_t *index)
-{
-    int32_t value;
-
-    value = (int32_t)(((uint32_t)buf[*index] << 24) |
-                      ((uint32_t)buf[*index + 1U] << 16) |
-                      ((uint32_t)buf[*index + 2U] << 8) |
-                      ((uint32_t)buf[*index + 3U]));
-
-    *index = (uint16_t)(*index + 4U);
-
-    return value;
-}
-
 static uint8_t adc_tcp_server_apply_cal_param(const uint8_t *data,
                                               uint16_t len)
 {
@@ -848,8 +721,8 @@ static uint8_t adc_tcp_server_apply_cal_param(const uint8_t *data,
 
     for (ch = 0U; ch < DEVICE_CONFIG_ADC_CHANNEL_COUNT; ch++)
     {
-        cal.ch[ch].k_raw = adc_tcp_server_get_i32_be(data, &index);
-        cal.ch[ch].b_raw = adc_tcp_server_get_i32_be(data, &index);
+        cal.ch[ch].k_raw = adc_proto_get_i32_be(data, &index);
+        cal.ch[ch].b_raw = adc_proto_get_i32_be(data, &index);
     }
 
     device_config_set_adc_calibration(&cal);
@@ -894,13 +767,13 @@ static uint8_t adc_tcp_server_apply_dac_param(uint16_t block_id,
 
     dac_config.ch[dac_ch].mode = data[index++];
 
-    dac_config.ch[dac_ch].manual_raw = adc_tcp_server_get_i32_be(data, &index);
+    dac_config.ch[dac_ch].manual_raw = adc_proto_get_i32_be(data, &index);
 
     dac_config.ch[dac_ch].adc_channel = data[index++];
 
-    dac_config.ch[dac_ch].k_raw = adc_tcp_server_get_i32_be(data, &index);
+    dac_config.ch[dac_ch].k_raw = adc_proto_get_i32_be(data, &index);
 
-    dac_config.ch[dac_ch].b_raw = adc_tcp_server_get_i32_be(data, &index);
+    dac_config.ch[dac_ch].b_raw = adc_proto_get_i32_be(data, &index);
 
     if (dac_config.ch[dac_ch].mode > DEVICE_CONFIG_DAC_MODE_ADC_CASCADE)
     {
@@ -1047,7 +920,9 @@ static void adc_tcp_server_parse_rx(struct tcp_pcb *tpcb)
             return; // 未接收完整等待下一次recv
         }
 
-        if (0U == adc_proto_is_frame_valid(s_rx_buf, frame_len))
+        if (0U == adc_proto_is_frame_valid(s_rx_buf,
+                                           frame_len,
+                                           ADC_PROTO_MAX_PAYLOAD_SIZE))
         {
             // 误判出来的假帧头，往后寻找真的帧头
             adc_tcp_server_drop_one_rx_byte();
@@ -1232,24 +1107,6 @@ static void adc_tcp_server_handle_frame(struct tcp_pcb *tpcb,
     }
 }
 
-static void adc_tcp_server_put_u32(uint8_t *buf,
-                                   uint16_t *index,
-                                   uint32_t value)
-{
-    buf[(*index)++] = (uint8_t)(value >> 24);
-    buf[(*index)++] = (uint8_t)(value >> 16);
-    buf[(*index)++] = (uint8_t)(value >> 8);
-    buf[(*index)++] = (uint8_t)(value & 0xFFU);
-}
-
-static void adc_tcp_server_put_u16(uint8_t *buf,
-                                   uint16_t *index,
-                                   uint16_t value)
-{
-    buf[(*index)++] = (uint8_t)(value >> 8);
-    buf[(*index)++] = (uint8_t)(value & 0xFFU);
-}
-
 static void adc_tcp_server_send_debug_status(void)
 {
     adc_acq_stats_t stats;
@@ -1273,20 +1130,20 @@ static void adc_tcp_server_send_debug_status(void)
 
     adc_acq_service_get_stats(&stats);
 
-    adc_tcp_server_put_u32(payload, &index, stats.adc1_half_count);
-    adc_tcp_server_put_u32(payload, &index, stats.adc2_half_count);
-    adc_tcp_server_put_u32(payload, &index, stats.adc3_half_count);
+    adc_proto_put_u32_be(payload, &index, stats.adc1_half_count);
+    adc_proto_put_u32_be(payload, &index, stats.adc2_half_count);
+    adc_proto_put_u32_be(payload, &index, stats.adc3_half_count);
 
-    adc_tcp_server_put_u32(payload, &index, stats.adc1_full_count);
-    adc_tcp_server_put_u32(payload, &index, stats.adc2_full_count);
-    adc_tcp_server_put_u32(payload, &index, stats.adc3_full_count);
+    adc_proto_put_u32_be(payload, &index, stats.adc1_full_count);
+    adc_proto_put_u32_be(payload, &index, stats.adc2_full_count);
+    adc_proto_put_u32_be(payload, &index, stats.adc3_full_count);
 
-    adc_tcp_server_put_u32(payload, &index, stats.sample_seq);
-    adc_tcp_server_put_u32(payload, &index, stats.no_block_count);
+    adc_proto_put_u32_be(payload, &index, stats.sample_seq);
+    adc_proto_put_u32_be(payload, &index, stats.no_block_count);
 
-    adc_tcp_server_put_u32(payload, &index, s_tcp_send_fail_count);
-    adc_tcp_server_put_u32(payload, &index, s_adc_stream_seq);
-    adc_tcp_server_put_u16(payload, &index, s_tcp_sndbuf_min);
+    adc_proto_put_u32_be(payload, &index, s_tcp_send_fail_count);
+    adc_proto_put_u32_be(payload, &index, s_adc_stream_seq);
+    adc_proto_put_u16_be(payload, &index, s_tcp_sndbuf_min);
 
     (void)adc_tcp_server_send_frame(s_client_pcb,
                                     ADC_PROTO_RSP_DEBUG_STATUS,
