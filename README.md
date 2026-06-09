@@ -215,22 +215,35 @@ enable stream_type
 `0x0009` - `0x000C` 每个 DA 通道参数块长度为 14 字节：
 
 ```text
-mode        1 byte
-manual_raw  4 bytes, int32_be
-adc_channel 1 byte
-k_raw       4 bytes, int32_be
-b_raw       4 bytes, int32_be
+mode             1 byte
+manual_voltage   4 bytes, float32_be
+adc_channel      1 byte
+k_raw            4 bytes, int32_be
+b_raw            4 bytes, int32_be
 ```
 
 字段含义：
 
-- `mode = 0`: 手动输出，上位机下发 `manual_raw`
+- `mode = 0`: 手动输出，上位机下发 `manual_voltage`
 - `mode = 1`: ADC 级联输出，选择 `adc_channel`
-- `manual_raw`: 手动模式下暂按 DAC 整数码值使用，范围最终限幅到 `0..4095`
+- `manual_voltage`: 手动模式下的目标输出电压，`float32_be`
 - `adc_channel`: 级联模式下选择 ADC 逻辑通道 `0..11`
-- `k_raw / b_raw`: DAC 标定参数
+- `k_raw / b_raw`: DAC 标定参数，用于把电压换算成 DAC 整数码值
 
-协议决策：DAC 手动输出后续统一改为上位机下发 `float32_be` 电压值，单片机根据 DAC 标定参数换算为 DAC 整数码值。当前 `manual_raw` 是过渡字段，等待 DAC 参数块格式升级后替换。
+手动 DAC 计算：
+
+```text
+dac_code = round(manual_voltage * (k_raw * DEVICE_CONFIG_DAC_CAL_K_SCALE) + b_raw)
+dac_code = limit(dac_code, 0, 4095)
+```
+
+默认 DAC 标定按 `0V..5V -> 0..4095`：
+
+```text
+k_raw = 8190000
+DEVICE_CONFIG_DAC_CAL_K_SCALE = 0.0001
+effective k = 819.0 code/V
+```
 
 ADC 到 DAC 级联计算：
 
@@ -346,6 +359,7 @@ udp.port == 8081
 | `tools/make_fixed_tcp_frame.py` | 生成 NetAssist 可发送的固定 150 字节 HEX 命令帧 |
 | `tools/read_log_snapshot.py` | 读取并解析 `0x000D` RAM 日志快照 |
 | `tools/tcp_stream_monitor.py` | 接收并解析 ADC 数据流，统计速率、gap、overlap、bad |
+| `tools/protocol_smoke_test.py` | 固定 150 字节协议冒烟测试：心跳、读 MAC、写/读 DA1、读 DAC 状态 |
 
 ## 常用测试命令
 
@@ -361,16 +375,29 @@ python tools\make_fixed_tcp_frame.py 07 00 00
 python tools\make_fixed_tcp_frame.py 02 00 05
 ```
 
-配置 DA1 手动输出 2048：
+配置 DA1 手动输出 2.5V：
 
 ```powershell
-python tools\make_fixed_tcp_frame.py 01 00 09 00 00 00 08 00 FF 05 F5 E1 00 00 00 00 00
+python tools\make_fixed_tcp_frame.py 01 00 09 00 40 20 00 00 FF 00 7C F8 30 00 00 00 00
 ```
 
 配置 DA1 级联 ADC0：
 
 ```powershell
-python tools\make_fixed_tcp_frame.py 01 00 09 01 00 00 00 00 00 05 F5 E1 00 00 00 00 00
+python tools\make_fixed_tcp_frame.py 01 00 09 01 00 00 00 00 00 00 7C F8 30 00 00 00 00
+```
+
+读取 DAC 当前输出 code：
+
+```powershell
+python tools\make_fixed_tcp_frame.py 02 00 0E
+```
+
+运行固定协议冒烟测试：
+
+```powershell
+cd C:\Users\myw29\Desktop\ADDA_collect\adc_collect
+python .\tools\protocol_smoke_test.py --host 192.168.1.21 --bind 192.168.1.20
 ```
 
 启动 raw ADC 数据上传：
@@ -451,7 +478,6 @@ avg_per_ch≈70 kSa/s
 ## 后续计划
 
 - 用实际 DAC 控制芯片验证 DA1~DA4 输出电压
-- 将 DAC 手动输出参数从过渡期 `manual_raw` 码值升级为 `float32_be` 电压值
 - 根据实际 DAC 性能决定是否降低级联更新频率或优化 SPI 发送
 - 把 ADC 标定、DAC 配置、网络参数统一纳入可靠 EEPROM 参数区
 - 整理正式上位机协议文档
