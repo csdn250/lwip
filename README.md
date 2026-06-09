@@ -178,6 +178,8 @@ b_raw       4 bytes, int32_be
 - `adc_channel`: 级联模式下选择 ADC 逻辑通道 `0..11`
 - `k_raw / b_raw`: DAC 标定参数
 
+协议决策：DAC 手动输出后续统一改为上位机下发 `float32_be` 电压值，单片机根据 DAC 标定参数换算为 DAC 整数码值。当前 `manual_raw` 是过渡字段，等待 DAC 参数块格式升级后替换。
+
 ADC 到 DAC 级联计算：
 
 ```text
@@ -218,6 +220,14 @@ arg2     uint32_be
 ```
 
 清空成功后，固件会重新记录一条 `LOG_CLEARED`，避免日志快照完全为空。
+
+调试版支持 IWDG 看门狗复位测试：
+
+```text
+写 block 0x000D，DATA = A5
+```
+
+该命令会停止主循环喂狗，约 4 秒后由 IWDG 触发复位。复位后读取日志，`RESET_CAUSE` 的 `arg1` 应包含 `0x10`。该命令受固件宏 `ADC_TCP_WATCHDOG_TEST_ENABLE` 控制，正式发布版本可关闭。
 
 ## ADC 数据流
 
@@ -336,6 +346,12 @@ python .\read_log_snapshot.py --host 192.168.1.21 --bind 192.168.1.20
 python tools\make_fixed_tcp_frame.py 01 00 0D 01
 ```
 
+生成 IWDG 看门狗复位测试命令：
+
+```powershell
+python tools\make_fixed_tcp_frame.py 01 00 0D A5
+```
+
 Python 监控 raw 数据流：
 
 ```powershell
@@ -369,6 +385,7 @@ ping -S 192.168.1.20 192.168.1.21
 - DAC 手动输出参数可通过 TCP 下发和读回
 - DAC ADC 级联软件链路已跑通，等待实际 DAC 控制芯片到货后验证电气输出
 - RAM 日志快照 `0x000D` 可通过 TCP 读取，写入 `01` 可清空日志
+- IWDG 看门狗已启用，正常主循环会定期喂狗；调试命令 `0x000D/A5` 已验证可触发 IWDG 复位，复位原因日志包含 `0x10`
 
 最近一次 ADC raw + DAC 级联软件测试结果：
 
@@ -382,6 +399,7 @@ avg_per_ch≈70 kSa/s
 ## 后续计划
 
 - 用实际 DAC 控制芯片验证 DA1~DA4 输出电压
+- 将 DAC 手动输出参数从过渡期 `manual_raw` 码值升级为 `float32_be` 电压值
 - 根据实际 DAC 性能决定是否降低级联更新频率或优化 SPI 发送
 - 把 ADC 标定、DAC 配置、网络参数统一纳入可靠 EEPROM 参数区
 - 整理正式上位机协议文档

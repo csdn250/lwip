@@ -47,6 +47,8 @@ EVENT_NAMES = {
     24: "DAC_PARAM_APPLIED",
     25: "DAC_OUTPUT_LIMIT",
     26: "LOG_CLEARED",
+    27: "RESET_CAUSE",
+    28: "WATCHDOG_TEST",
 }
 
 

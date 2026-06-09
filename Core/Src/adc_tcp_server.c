@@ -40,7 +40,11 @@
 #define ADC_PROTO_RSP_RAW_DATA 0x81U
 #define ADC_PROTO_RSP_CONVERTED_DATA 0x82U
 
-#define ADC_LOG_CLEAR_ACTION_CLEAR 0x01U
+#define ADC_LOG_DIAG_ACTION_CLEAR 0x01U
+#define ADC_LOG_DIAG_ACTION_STOP_WATCHDOG_FEED 0xA5U
+
+/* Debug-only command: write block 0x000D with DATA=A5 to verify IWDG reset. */
+#define ADC_TCP_WATCHDOG_TEST_ENABLE 1U
 
 #define ADC_TCP_RX_BUF_SIZE 1500U
 #define ADC_PROTO_MAX_PAYLOAD_SIZE (ADC_TCP_RX_BUF_SIZE - ADC_PROTO_FRAME_OVERHEAD)
@@ -80,6 +84,7 @@ static uint32_t s_adc_stream_seq;
 static uint32_t s_debug_status_last_tick;
 static uint32_t s_tcp_send_fail_count;
 static uint16_t s_tcp_sndbuf_min;
+static uint8_t s_watchdog_feed_enabled = 1U;
 
 /* TCP 接收缓存：先把 pbuf 里的字节拷贝到这里，再释放 pbuf。 */
 static uint8_t s_rx_buf[ADC_TCP_RX_BUF_SIZE];
@@ -273,6 +278,11 @@ uint8_t adc_tcp_server_is_streaming(void)
 uint8_t adc_tcp_server_is_network_config_dirty(void)
 {
     return adc_param_store_is_network_dirty();
+}
+
+uint8_t adc_tcp_server_is_watchdog_feed_enabled(void)
+{
+    return (0U != s_watchdog_feed_enabled) ? 1U : 0U;
 }
 
 /* =========================== lwIP Callbacks ============================ */
@@ -774,7 +784,7 @@ static void adc_tcp_server_handle_log_clear(struct tcp_pcb *tpcb,
     status = ADC_PROTO_WRITE_STATUS_BAD_LEN;
 
     if ((3U == payload_len) &&
-        (ADC_LOG_CLEAR_ACTION_CLEAR == payload[2]))
+        (ADC_LOG_DIAG_ACTION_CLEAR == payload[2]))
     {
         app_log_clear();
         app_log_record(APP_LOG_EVENT_LOG_CLEARED,
@@ -783,6 +793,18 @@ static void adc_tcp_server_handle_log_clear(struct tcp_pcb *tpcb,
                        0U);
         status = ADC_PROTO_WRITE_STATUS_OK;
     }
+#if ADC_TCP_WATCHDOG_TEST_ENABLE
+    else if ((3U == payload_len) &&
+             (ADC_LOG_DIAG_ACTION_STOP_WATCHDOG_FEED == payload[2]))
+    {
+        s_watchdog_feed_enabled = 0U;
+        app_log_record(APP_LOG_EVENT_WATCHDOG_TEST,
+                       payload[2],
+                       0U,
+                       0U);
+        status = ADC_PROTO_WRITE_STATUS_OK;
+    }
+#endif
 
     (void)adc_tcp_server_send_write_status(tpcb,
                                            block_id,

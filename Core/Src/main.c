@@ -21,6 +21,21 @@ void SystemClock_Config(void);
 void PeriphCommonClock_Config(void);
 static void MPU_Config(void);
 
+static void MX_IWDG1_Init(void);
+
+static IWDG_HandleTypeDef hiwdg1;
+
+#define APP_RESET_CAUSE_PIN (1UL << 0)
+#define APP_RESET_CAUSE_POR (1UL << 1)
+#define APP_RESET_CAUSE_BOR (1UL << 2)
+#define APP_RESET_CAUSE_SOFT (1UL << 3)
+#define APP_RESET_CAUSE_IWDG (1UL << 4)
+#define APP_RESET_CAUSE_WWDG (1UL << 5)
+#define APP_RESET_CAUSE_LPWR1 (1UL << 6)
+#define APP_RESET_CAUSE_LPWR2 (1UL << 7)
+
+static void App_LogResetCause(void);
+
 int main(void)
 {
 
@@ -35,7 +50,7 @@ int main(void)
   app_log_init();
   app_log_key_event(APP_LOG_EVENT_LOGGER_STARTED,
                     "logger started");
-
+  App_LogResetCause();
   device_config_init_defaults();
 
   MX_GPIO_Init();
@@ -70,6 +85,8 @@ int main(void)
   adc_acq_service_start();
   dac_output_service_init();
 
+  MX_IWDG1_Init();
+
   while (1)
   {
     /* lwIP raw API must be polled frequently in the main loop. */
@@ -92,6 +109,77 @@ int main(void)
 
     /* UDP broadcasts device info only when no TCP client is connected. */
     udp_discovery_process();
+
+    if ((0U != adc_tcp_server_is_watchdog_feed_enabled()) &&
+        (HAL_IWDG_Refresh(&hiwdg1) != HAL_OK))
+    {
+      Error_Handler();
+    }
+  }
+}
+
+static void App_LogResetCause(void)
+{
+  uint32_t cause = 0U;
+
+  if (__HAL_RCC_GET_FLAG(RCC_FLAG_PINRST) != 0U)
+  {
+    cause |= APP_RESET_CAUSE_PIN;
+  }
+
+  if (__HAL_RCC_GET_FLAG(RCC_FLAG_PORRST) != 0U)
+  {
+    cause |= APP_RESET_CAUSE_POR;
+  }
+
+  if (__HAL_RCC_GET_FLAG(RCC_FLAG_BORRST) != 0U)
+  {
+    cause |= APP_RESET_CAUSE_BOR;
+  }
+
+  if (__HAL_RCC_GET_FLAG(RCC_FLAG_SFTRST) != 0U)
+  {
+    cause |= APP_RESET_CAUSE_SOFT;
+  }
+
+  if (__HAL_RCC_GET_FLAG(RCC_FLAG_IWDG1RST) != 0U)
+  {
+    cause |= APP_RESET_CAUSE_IWDG;
+  }
+
+  if (__HAL_RCC_GET_FLAG(RCC_FLAG_WWDG1RST) != 0U)
+  {
+    cause |= APP_RESET_CAUSE_WWDG;
+  }
+
+  if (__HAL_RCC_GET_FLAG(RCC_FLAG_LPWR1RST) != 0U)
+  {
+    cause |= APP_RESET_CAUSE_LPWR1;
+  }
+
+  if (__HAL_RCC_GET_FLAG(RCC_FLAG_LPWR2RST) != 0U)
+  {
+    cause |= APP_RESET_CAUSE_LPWR2;
+  }
+
+  app_log_record(APP_LOG_EVENT_RESET_CAUSE,
+                 0U,
+                 cause,
+                 0U);
+
+  __HAL_RCC_CLEAR_RESET_FLAGS();
+}
+
+static void MX_IWDG1_Init(void)
+{
+  hiwdg1.Instance = IWDG1;
+  hiwdg1.Init.Prescaler = IWDG_PRESCALER_64;
+  hiwdg1.Init.Reload = 2000U;
+  hiwdg1.Init.Window = IWDG_WINDOW_DISABLE;
+
+  if (HAL_IWDG_Init(&hiwdg1) != HAL_OK)
+  {
+    Error_Handler();
   }
 }
 
