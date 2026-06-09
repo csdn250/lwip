@@ -68,6 +68,8 @@
 
 #define DAC_PARAM_BYTES 14U
 
+#define DAC_STATUS_BYTES (DEVICE_CONFIG_DAC_CHANNEL_COUNT * sizeof(uint16_t))
+
 #define ADC_TCP_DEBUG_STATUS_ENABLE 0U
 
 /* ============================= Module State ============================ */
@@ -841,6 +843,7 @@ static void adc_tcp_server_handle_write_param(struct tcp_pcb *tpcb,
     }
 
     block_id = (uint16_t)(((uint16_t)payload[0] << 8) | payload[1]);
+
     if (ADC_PARAM_BLOCK_LOG_SNAPSHOT == block_id)
     {
         adc_tcp_server_handle_log_clear(tpcb, payload, payload_len);
@@ -976,6 +979,31 @@ static void adc_tcp_server_handle_read_param(struct tcp_pcb *tpcb,
     }
 
     block_id = (uint16_t)(((uint16_t)payload[0] << 8) | payload[1]);
+
+    if (ADC_PARAM_BLOCK_DAC_STATUS == block_id)
+    {
+        uint8_t status_payload[DAC_STATUS_BYTES];
+        uint16_t codes[DEVICE_CONFIG_DAC_CHANNEL_COUNT];
+        uint16_t index;
+        uint8_t ch;
+
+        dac_output_service_get_current_codes(codes,
+                                             DEVICE_CONFIG_DAC_CHANNEL_COUNT);
+
+        index = 0U;
+        for (ch = 0U; ch < DEVICE_CONFIG_DAC_CHANNEL_COUNT; ch++)
+        {
+            adc_proto_put_u16_be(status_payload, &index, codes[ch]);
+        }
+
+        (void)adc_tcp_server_send_fixed_frame(tpcb,
+                                              ADC_PROTO_CMD_READ_PARAM,
+                                              block_id,
+                                              status_payload,
+                                              index);
+        return;
+    }
+
     if (ADC_PARAM_BLOCK_LOG_SNAPSHOT == block_id)
     {
         uint16_t log_len;

@@ -5,7 +5,7 @@
 
 #define DEVICE_CONFIG_EEPROM_ADDR 0x0000U
 #define DEVICE_CONFIG_MAGIC 0x41444346UL
-#define DEVICE_CONFIG_VERSION 2U
+#define DEVICE_CONFIG_VERSION 3U
 
 typedef struct
 {
@@ -67,7 +67,7 @@ void device_config_init_defaults(void)
     for (ch = 0U; ch < DEVICE_CONFIG_DAC_CHANNEL_COUNT; ch++)
     {
         s_dac_config.ch[ch].mode = DEVICE_CONFIG_DAC_MODE_MANUAL;
-        s_dac_config.ch[ch].manual_raw = 0L;
+        s_dac_config.ch[ch].manual_voltage = 0.0f;
         s_dac_config.ch[ch].adc_channel = DEVICE_CONFIG_DAC_ADC_CH_INVALID;
         s_dac_config.ch[ch].k_raw = DEVICE_CONFIG_DAC_CAL_DEFAULT_K_RAW;
         s_dac_config.ch[ch].b_raw = DEVICE_CONFIG_DAC_CAL_DEFAULT_B_RAW;

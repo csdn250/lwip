@@ -16,9 +16,9 @@
 #define DEVICE_CONFIG_DAC_MODE_MANUAL 0U
 #define DEVICE_CONFIG_DAC_MODE_ADC_CASCADE 1U
 #define DEVICE_CONFIG_DAC_ADC_CH_INVALID 0xFFU
-#define DEVICE_CONFIG_DAC_CAL_DEFAULT_K_RAW 100000000L
+#define DEVICE_CONFIG_DAC_CAL_DEFAULT_K_RAW 8190000L
 #define DEVICE_CONFIG_DAC_CAL_DEFAULT_B_RAW 0L
-#define DEVICE_CONFIG_DAC_CAL_K_SCALE 0.00000001f
+#define DEVICE_CONFIG_DAC_CAL_K_SCALE 0.0001f
 
 typedef struct
 {
@@ -44,7 +44,7 @@ typedef struct
 typedef struct
 {
     uint8_t mode;
-    int32_t manual_raw;
+    float manual_voltage;
     uint8_t adc_channel;
     int32_t k_raw;
     int32_t b_raw;

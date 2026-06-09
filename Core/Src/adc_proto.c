@@ -160,6 +160,44 @@ int32_t adc_proto_get_i32_be(const uint8_t *buf,
     return value;
 }
 
+float adc_proto_get_float_be(const uint8_t *buf,
+                             uint16_t *index)
+{
+    uint32_t raw;
+    float value;
+
+    if ((NULL == buf) || (NULL == index))
+    {
+        return 0.0f;
+    }
+
+    raw = ((uint32_t)buf[*index] << 24) |
+          ((uint32_t)buf[*index + 1U] << 16) |
+          ((uint32_t)buf[*index + 2U] << 8) |
+          ((uint32_t)buf[*index + 3U]);
+
+    *index = (uint16_t)(*index + 4U);
+
+    memcpy(&value, &raw, sizeof(value));
+
+    return value;
+}
+
+void adc_proto_put_float_be(uint8_t *buf,
+                            uint16_t *index,
+                            float value)
+{
+    uint32_t raw;
+
+    if ((NULL == buf) || (NULL == index))
+    {
+        return;
+    }
+
+    memcpy(&raw, &value, sizeof(raw));
+    adc_proto_put_u32_be(buf, index, raw);
+}
+
 void adc_proto_put_u32_be(uint8_t *buf,
                           uint16_t *index,
                           uint32_t value)

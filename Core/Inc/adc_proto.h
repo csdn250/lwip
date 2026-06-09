@@ -42,6 +42,13 @@ uint16_t adc_proto_build_frame(uint8_t *frame,
 int32_t adc_proto_get_i32_be(const uint8_t *buf,
                              uint16_t *index);
 
+float adc_proto_get_float_be(const uint8_t *buf,
+                             uint16_t *index);
+
+void adc_proto_put_float_be(uint8_t *buf,
+                            uint16_t *index,
+                            float value);
+
 void adc_proto_put_u32_be(uint8_t *buf,
                           uint16_t *index,
                           uint32_t value);

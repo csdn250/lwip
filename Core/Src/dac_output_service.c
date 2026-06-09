@@ -7,6 +7,7 @@
 
 #define DAC_OUTPUT_MAX_CASCADE_SAMPLES_PER_PROCESS 8U
 static device_dac_config_t s_last_config;
+static uint16_t s_current_code[DEVICE_CONFIG_DAC_CHANNEL_COUNT];
 
 static uint8_t dac_output_service_config_changed(const device_dac_config_t *config);
 static uint16_t dac_output_service_limit_code(int32_t value);
@@ -21,6 +22,7 @@ static uint8_t dac_output_service_has_adc_cascade(const device_dac_config_t *con
 void dac_output_service_init(void)
 {
     memset(&s_last_config, 0xFF, sizeof(s_last_config));
+    memset(s_current_code, 0, sizeof(s_current_code));
 }
 
 void dac_output_service_process(void)
@@ -41,6 +43,7 @@ void dac_output_service_process(void)
         if (DEVICE_CONFIG_DAC_MODE_MANUAL == config->ch[ch].mode)
         {
             code = dac_output_service_manual_to_code(&config->ch[ch]);
+            s_current_code[ch] = code;
             dac_tpc112s4_write_channel(ch, code);
         }
     }
@@ -54,9 +57,9 @@ void dac_output_service_process_adc_cascade(void)
     adc_acq_sample_t sample;
     uint8_t count;
 
-    config=device_config_get_dac_config();
+    config = device_config_get_dac_config();
 
-    if(0U==dac_output_service_has_adc_cascade(config))
+    if (0U == dac_output_service_has_adc_cascade(config))
     {
         return;
     }
@@ -68,11 +71,11 @@ void dac_output_service_process_adc_cascade(void)
     从 ADC 采集服务最多取 8 组样本
     每取到一组，就执行一次 DAC 级联输出
     */
-    for(count=0U;
-        count<DAC_OUTPUT_MAX_CASCADE_SAMPLES_PER_PROCESS;
-        count++)
+    for (count = 0U;
+         count < DAC_OUTPUT_MAX_CASCADE_SAMPLES_PER_PROCESS;
+         count++)
     {
-        if(0U==adc_acq_service_get_sample(&sample))
+        if (0U == adc_acq_service_get_sample(&sample))
         {
             return;
         }
@@ -115,7 +118,31 @@ void dac_output_service_apply_adc_sample(const adc_acq_sample_t *sample)
                                                   &adc_cal->ch[adc_ch],
                                                   &dac_config->ch[da_ch]);
 
+        s_current_code[da_ch] = code;
         dac_tpc112s4_write_channel(da_ch, code);
+    }
+}
+
+void dac_output_service_get_current_codes(uint16_t *codes,
+                                          uint8_t max_count)
+{
+    uint8_t ch;
+    uint8_t count;
+
+    if (NULL == codes)
+    {
+        return;
+    }
+
+    count = max_count;
+    if (count > DEVICE_CONFIG_DAC_CHANNEL_COUNT)
+    {
+        count = DEVICE_CONFIG_DAC_CHANNEL_COUNT;
+    }
+
+    for (ch = 0U; ch < count; ch++)
+    {
+        codes[ch] = s_current_code[ch];
     }
 }
 
@@ -135,14 +162,14 @@ static uint8_t dac_output_service_has_adc_cascade(const device_dac_config_t *con
 {
     uint8_t ch;
 
-    if(NULL==config)
+    if (NULL == config)
     {
         return 0U;
     }
 
-    for(ch=0U;ch<DEVICE_CONFIG_DAC_CHANNEL_COUNT;ch++)
+    for (ch = 0U; ch < DEVICE_CONFIG_DAC_CHANNEL_COUNT; ch++)
     {
-        if(DEVICE_CONFIG_DAC_MODE_ADC_CASCADE==config->ch[ch].mode)
+        if (DEVICE_CONFIG_DAC_MODE_ADC_CASCADE == config->ch[ch].mode)
         {
             return 1U;
         }
@@ -168,14 +195,19 @@ static uint16_t dac_output_service_limit_code(int32_t value)
 
 static uint16_t dac_output_service_manual_to_code(const device_dac_channel_config_t *config)
 {
+    float dac_value;
     int32_t code;
 
-    /*
-     *临时规则：
-     *manual_raw先按DAC整数码值使用
-     *后面接ADC级联时，再统一做ADC标定->DAC标定->code
-     */
-    code = config->manual_raw;
+    if (NULL == config)
+    {
+        return 0U;
+    }
+
+    dac_value = (config->manual_voltage *
+                 ((float)config->k_raw * DEVICE_CONFIG_DAC_CAL_K_SCALE)) +
+                (float)config->b_raw;
+
+    code = dac_output_service_round_float_to_i32(dac_value);
 
     return dac_output_service_limit_code(code);
 }
@@ -210,4 +242,3 @@ static int32_t dac_output_service_round_float_to_i32(float value)
 
     return (int32_t)(value - 0.5f);
 }
-

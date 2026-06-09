@@ -2,6 +2,58 @@
 
 STM32H743 + lwIP based AD/DA data collection firmware.
 
+## DAC Manual Voltage Update
+
+2026-06-09 update:
+
+- DA parameter blocks `0x0009`~`0x000C` now use `manual_voltage` as `float32_be`.
+- DA block wire format is still 14 bytes:
+
+```text
+mode             1 byte
+manual_voltage   4 bytes, float32_be
+adc_channel      1 byte
+k_raw            4 bytes, int32_be
+b_raw            4 bytes, int32_be
+```
+
+- Manual DAC output formula:
+
+```text
+dac_code = round(manual_voltage * (k_raw * DEVICE_CONFIG_DAC_CAL_K_SCALE) + b_raw)
+dac_code is clamped to 0..4095
+```
+
+- Default DAC calibration currently assumes `0V..5V -> 0..4095`:
+
+```text
+DEVICE_CONFIG_DAC_CAL_DEFAULT_K_RAW = 8190000
+DEVICE_CONFIG_DAC_CAL_K_SCALE       = 0.0001
+effective k                         = 819.0 code/V
+```
+
+- Dynamic read-only block `0x000E` returns the latest DAC output code snapshot:
+
+```text
+DA1_code uint16_be
+DA2_code uint16_be
+DA3_code uint16_be
+DA4_code uint16_be
+```
+
+Verified example:
+
+```text
+Write DA1 block 0x0009:
+mode=0, manual_voltage=2.5f, adc_channel=0xFF, k_raw=8190000, b_raw=0
+
+Read DAC status block 0x000E:
+DA1_code = 0x0800 = 2048
+DA2_code = 0
+DA3_code = 0
+DA4_code = 0
+```
+
 本工程当前目标是实现多通道 ADC 采集、四通道 DAC 输出，以及基于以太网的上位机参数配置和数据上传。设备启动后提供 TCP 服务；没有 TCP 客户端连接时，通过 UDP 周期广播设备信息，方便上位机发现设备。
 
 ## 当前状态

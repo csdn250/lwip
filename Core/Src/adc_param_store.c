@@ -90,9 +90,9 @@ static void adc_param_store_sync_dac_param_block(uint8_t *buf,
 
     buf[index++] = config->mode;
 
-    adc_proto_put_u32_be(buf,
-                         &index,
-                         (uint32_t)config->manual_raw);
+    adc_proto_put_float_be(buf,
+                           &index,
+                           config->manual_voltage);
 
     buf[index++] = config->adc_channel;
 
@@ -356,7 +356,7 @@ uint8_t adc_param_store_apply_dac_param(uint16_t block_id,
 
     dac_config.ch[dac_ch].mode = data[index++];
 
-    dac_config.ch[dac_ch].manual_raw = adc_proto_get_i32_be(data, &index);
+    dac_config.ch[dac_ch].manual_voltage = adc_proto_get_float_be(data, &index);
 
     dac_config.ch[dac_ch].adc_channel = data[index++];
 
