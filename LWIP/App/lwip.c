@@ -118,6 +118,84 @@ void MX_LWIP_Init(void)
   /* USER CODE END 3 */
 }
 
+void MX_LWIP_ApplyNetworkConfig(void)
+{
+  const device_network_config_t *net_cfg;
+
+  net_cfg = device_config_get_network();
+
+  IP_ADDRESS[0] = net_cfg->ip[0];
+  IP_ADDRESS[1] = net_cfg->ip[1];
+  IP_ADDRESS[2] = net_cfg->ip[2];
+  IP_ADDRESS[3] = net_cfg->ip[3];
+
+  NETMASK_ADDRESS[0] = net_cfg->netmask[0];
+  NETMASK_ADDRESS[1] = net_cfg->netmask[1];
+  NETMASK_ADDRESS[2] = net_cfg->netmask[2];
+  NETMASK_ADDRESS[3] = net_cfg->netmask[3];
+
+  GATEWAY_ADDRESS[0] = net_cfg->gateway[0];
+  GATEWAY_ADDRESS[1] = net_cfg->gateway[1];
+  GATEWAY_ADDRESS[2] = net_cfg->gateway[2];
+  GATEWAY_ADDRESS[3] = net_cfg->gateway[3];
+
+  IP4_ADDR(&ipaddr, IP_ADDRESS[0], IP_ADDRESS[1], IP_ADDRESS[2], IP_ADDRESS[3]);
+  IP4_ADDR(&netmask, NETMASK_ADDRESS[0], NETMASK_ADDRESS[1], NETMASK_ADDRESS[2], NETMASK_ADDRESS[3]);
+  IP4_ADDR(&gw, GATEWAY_ADDRESS[0], GATEWAY_ADDRESS[1], GATEWAY_ADDRESS[2], GATEWAY_ADDRESS[3]);
+
+  netif_set_addr(&gnetif, &ipaddr, &netmask, &gw);
+
+  if (netif_is_link_up(&gnetif))
+  {
+    netif_set_up(&gnetif);
+  }
+}
+
+uint8_t MX_LWIP_IsNetworkConfigApplied(void)
+{
+  const device_network_config_t *net_cfg;
+  ip4_addr_t expect_ip;
+  ip4_addr_t expect_netmask;
+  ip4_addr_t expect_gw;
+
+  net_cfg = device_config_get_network();
+
+  IP4_ADDR(&expect_ip,
+           net_cfg->ip[0],
+           net_cfg->ip[1],
+           net_cfg->ip[2],
+           net_cfg->ip[3]);
+
+  IP4_ADDR(&expect_netmask,
+           net_cfg->netmask[0],
+           net_cfg->netmask[1],
+           net_cfg->netmask[2],
+           net_cfg->netmask[3]);
+
+  IP4_ADDR(&expect_gw,
+           net_cfg->gateway[0],
+           net_cfg->gateway[1],
+           net_cfg->gateway[2],
+           net_cfg->gateway[3]);
+
+  if (0 == ip4_addr_cmp(netif_ip4_addr(&gnetif), &expect_ip))
+  {
+    return 0U;
+  }
+
+  if (0 == ip4_addr_cmp(netif_ip4_netmask(&gnetif), &expect_netmask))
+  {
+    return 0U;
+  }
+
+  if (0 == ip4_addr_cmp(netif_ip4_gw(&gnetif), &expect_gw))
+  {
+    return 0U;
+  }
+
+  return 1U;
+}
+
 #ifdef USE_OBSOLETE_USER_CODE_SECTION_4
 /* Kept to help code migration. (See new 4_1, 4_2... sections) */
 /* Avoid to use this user section which will become obsolete. */

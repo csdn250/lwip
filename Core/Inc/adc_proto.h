@@ -16,6 +16,14 @@
 #define ADC_PROTO_FRAME_OVERHEAD (ADC_PROTO_HEADER_SIZE + ADC_PROTO_TAIL_SIZE)
 #define ADC_PROTO_MIN_FRAME_SIZE ADC_PROTO_FRAME_OVERHEAD
 
+#define ADC_PROTO_FIXED_FRAME_SIZE 150U
+#define ADC_PROTO_FIXED_CRC_OFFSET 144U
+#define ADC_PROTO_FIXED_EOF_OFFSET 148U
+#define ADC_PROTO_FIXED_DATA_OFFSET ADC_PROTO_HEADER_SIZE
+#define ADC_PROTO_FIXED_BLOCK_ID_SIZE 2U
+#define ADC_PROTO_FIXED_DATA_CAPACITY \
+    (ADC_PROTO_FIXED_CRC_OFFSET - ADC_PROTO_FIXED_DATA_OFFSET - ADC_PROTO_FIXED_BLOCK_ID_SIZE)
+
 uint32_t adc_proto_crc32(const uint8_t *data,
                          uint16_t len);
 
@@ -41,5 +49,18 @@ void adc_proto_put_u32_be(uint8_t *buf,
 void adc_proto_put_u16_be(uint8_t *buf,
                           uint16_t *index,
                           uint16_t value);
+
+uint8_t adc_proto_is_fixed_frame_valid(const uint8_t *frame);
+
+uint16_t adc_proto_fixed_data_len(const uint8_t *frame);
+
+uint16_t adc_proto_fixed_block_id(const uint8_t *frame);
+
+uint16_t adc_proto_build_fixed_frame(uint8_t *frame,
+                                     uint16_t frame_buf_size,
+                                     uint8_t cmd,
+                                     uint16_t block_id,
+                                     const uint8_t *data,
+                                     uint16_t data_len);
 
 #endif /* __ADC_PROTO_H */

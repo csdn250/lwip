@@ -62,6 +62,25 @@ TCP 命令和 UDP 发现广播使用统一外层帧结构：
 
 TCP 是字节流，不是一包一条命令。固件会先把收到的数据复制到接收缓冲区，释放 lwIP `pbuf`，再从缓冲区中按帧头、长度、CRC 和帧尾切出完整命令并顺序处理。
 
+### 固定 150 字节命令帧
+
+当前上位机下发的普通 TCP 命令使用固定 150 字节帧，适用于 `0x01` 写参数、`0x02` 读参数、`0x07` 心跳：
+
+```text
+12 34 CMD LEN_H LEN_L BLOCK_ID_H BLOCK_ID_L DATA... PAD... CRC32 56 78
+```
+
+字段说明：
+
+- 固定帧总长度为 150 字节。
+- `LEN` 表示 `DATA` 的有效长度，不包含 `BLOCK_ID`。
+- `BLOCK_ID` 固定占 2 字节，位于第 5~6 字节。
+- `DATA` 从第 7 字节开始，最大 137 字节，不足部分补 0。
+- `CRC32` 位于第 144~147 字节，对第 0~143 字节计算，发送时大端。
+- 帧尾 `56 78` 位于第 148~149 字节。
+
+ADC 数据流 `0x81/0x82` 仍使用可变长度帧，用于提高连续采集数据的发送效率。
+
 ## 命令字
 
 | 命令 | 方向 | 说明 |
@@ -102,6 +121,7 @@ BLOCK_ID_H BLOCK_ID_L
 | `0x000A` | DA2 配置 |
 | `0x000B` | DA3 配置 |
 | `0x000C` | DA4 配置 |
+| `0x000D` | RAM 日志快照，只读；写入 `01` 可清空 RAM 日志 |
 
 ### ADC 标定参数
 
@@ -166,6 +186,39 @@ dac_value = adc_value * dac_k + dac_b
 dac_code  = round(dac_value), then limit to 0..4095
 ```
 
+### RAM 日志快照
+
+`0x000D` 是动态只读参数块，不写入 EEPROM。它从 RAM 环形日志中返回最近事件，便于现场排查。当前 RAM 日志容量为 64 条，单次固定帧最多返回最近 8 条。
+
+读 `0x000D` 返回的数据格式：
+
+```text
+version      1 byte, 当前为 0x01
+count        1 byte, 本帧日志条数
+record_size  1 byte, 当前为 16
+reserved     1 byte
+
+records...
+```
+
+每条日志 16 字节：
+
+```text
+tick_ms  uint32_be
+event    uint16_be
+arg0     uint16_be
+arg1     uint32_be
+arg2     uint32_be
+```
+
+清空 RAM 日志：
+
+```text
+写 block 0x000D，DATA = 01
+```
+
+清空成功后，固件会重新记录一条 `LOG_CLEARED`，避免日志快照完全为空。
+
 ## ADC 数据流
 
 ADC 数据流 payload 内部还有一层数据头，所有多字节字段当前统一使用大端：
@@ -227,7 +280,9 @@ udp.port == 8081
 | `Core/Src/dac_output_service.c` | DAC 手动输出和 ADC 级联输出服务 |
 | `Core/Src/udp_discovery.c` | UDP 发现广播 |
 | `Core/Src/eeprom_storage.c` | 24C64 EEPROM 读写框架 |
-| `tools/make_tcp_frame.py` | 生成 NetAssist 可发送的 HEX 帧 |
+| `Core/Src/app_log.c` | RTT 日志和 RAM 环形事件日志 |
+| `tools/make_fixed_tcp_frame.py` | 生成 NetAssist 可发送的固定 150 字节 HEX 命令帧 |
+| `tools/read_log_snapshot.py` | 读取并解析 `0x000D` RAM 日志快照 |
 | `tools/tcp_stream_monitor.py` | 接收并解析 ADC 数据流，统计速率、gap、overlap、bad |
 
 ## 常用测试命令
@@ -235,37 +290,50 @@ udp.port == 8081
 生成心跳帧：
 
 ```powershell
-python tools\make_tcp_frame.py 07
+python tools\make_fixed_tcp_frame.py 07 00 00
 ```
 
 读取 MAC 参数块：
 
 ```powershell
-python tools\make_tcp_frame.py 02 00 05
+python tools\make_fixed_tcp_frame.py 02 00 05
 ```
 
 配置 DA1 手动输出 2048：
 
 ```powershell
-python tools\make_tcp_frame.py 01 00 09 00 00 00 08 00 FF 05 F5 E1 00 00 00 00 00
+python tools\make_fixed_tcp_frame.py 01 00 09 00 00 00 08 00 FF 05 F5 E1 00 00 00 00 00
 ```
 
 配置 DA1 级联 ADC0：
 
 ```powershell
-python tools\make_tcp_frame.py 01 00 09 01 00 00 00 00 00 05 F5 E1 00 00 00 00 00
+python tools\make_fixed_tcp_frame.py 01 00 09 01 00 00 00 00 00 05 F5 E1 00 00 00 00 00
 ```
 
 启动 raw ADC 数据上传：
 
 ```powershell
-python tools\make_tcp_frame.py 01 00 02 01 81
+python tools\make_fixed_tcp_frame.py 01 00 02 01 81
 ```
 
 停止 raw ADC 数据上传：
 
 ```powershell
-python tools\make_tcp_frame.py 01 00 02 00 81
+python tools\make_fixed_tcp_frame.py 01 00 02 00 81
+```
+
+读取 RAM 日志快照：
+
+```powershell
+cd C:\Users\myw29\Desktop\ADDA_collect\adc_collect\tools
+python .\read_log_snapshot.py --host 192.168.1.21 --bind 192.168.1.20
+```
+
+生成清空 RAM 日志命令：
+
+```powershell
+python tools\make_fixed_tcp_frame.py 01 00 0D 01
 ```
 
 Python 监控 raw 数据流：
@@ -300,6 +368,7 @@ ping -S 192.168.1.20 192.168.1.21
 - IP/MAC/端口/子网掩码/网关可通过 TCP 下发并同步到 lwIP 当前配置
 - DAC 手动输出参数可通过 TCP 下发和读回
 - DAC ADC 级联软件链路已跑通，等待实际 DAC 控制芯片到货后验证电气输出
+- RAM 日志快照 `0x000D` 可通过 TCP 读取，写入 `01` 可清空日志
 
 最近一次 ADC raw + DAC 级联软件测试结果：
 

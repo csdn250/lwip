@@ -16,26 +16,31 @@ CHANNEL_COUNT = 12
 DEFAULT_K_RAW = 100_000_000
 DEFAULT_B_RAW = 0
 
+FIXED_FRAME_LEN = 150
+FIXED_CRC_OFFSET = 144
+FIXED_EOF_OFFSET = 148
+FIXED_DATA_CAPACITY = 137
 
-def build_frame(cmd: int, payload: bytes = b"") -> bytes:
-    head = bytes(
-        [
-            SOF[0],
-            SOF[1],
-            cmd & 0xFF,
-            (len(payload) >> 8) & 0xFF,
-            len(payload) & 0xFF,
-        ]
-    )
-    body = head + payload
-    crc = zlib.crc32(body) & 0xFFFFFFFF
-    return body + crc.to_bytes(4, "big") + EOF
+
+def build_fixed_frame(cmd: int, block_id: int, data: bytes = b"") -> bytes:
+    if len(data) > FIXED_DATA_CAPACITY:
+        raise ValueError(f"fixed frame data too long: {len(data)}")
+
+    frame = bytearray(FIXED_FRAME_LEN)
+    frame[0:2] = SOF
+    frame[2] = cmd & 0xFF
+    frame[3:5] = len(data).to_bytes(2, "big")
+    frame[5:7] = block_id.to_bytes(2, "big")
+    frame[7 : 7 + len(data)] = data
+
+    crc = zlib.crc32(bytes(frame[:FIXED_CRC_OFFSET])) & 0xFFFFFFFF
+    frame[FIXED_CRC_OFFSET : FIXED_CRC_OFFSET + 4] = crc.to_bytes(4, "big")
+    frame[FIXED_EOF_OFFSET : FIXED_EOF_OFFSET + 2] = EOF
+    return bytes(frame)
 
 
 def build_cal_payload(test_channel: int, k_raw: int, b_raw: int) -> bytes:
     payload = bytearray()
-
-    payload.extend(BLOCK_CAL_DATA.to_bytes(2, "big"))
 
     for ch in range(CHANNEL_COUNT):
         if ch == test_channel:
@@ -49,19 +54,25 @@ def build_cal_payload(test_channel: int, k_raw: int, b_raw: int) -> bytes:
 
 
 def parse_write_status(data: bytes):
-    if len(data) < 12:
+    if len(data) < FIXED_FRAME_LEN:
         return None
 
-    if data[0:2] != SOF or data[-2:] != EOF:
+    frame = data[:FIXED_FRAME_LEN]
+
+    if frame[0:2] != SOF or frame[FIXED_EOF_OFFSET : FIXED_EOF_OFFSET + 2] != EOF:
         return None
 
-    payload_len = (data[3] << 8) | data[4]
-    if data[2] != CMD_WRITE_PARAM or payload_len < 3:
+    payload_len = (frame[3] << 8) | frame[4]
+    if frame[2] != CMD_WRITE_PARAM or payload_len < 1:
         return None
 
-    payload = data[5 : 5 + payload_len]
-    block_id = (payload[0] << 8) | payload[1]
-    status = payload[2]
+    crc_recv = int.from_bytes(frame[FIXED_CRC_OFFSET : FIXED_CRC_OFFSET + 4], "big")
+    crc_calc = zlib.crc32(frame[:FIXED_CRC_OFFSET]) & 0xFFFFFFFF
+    if crc_recv != crc_calc:
+        return None
+
+    block_id = int.from_bytes(frame[5:7], "big")
+    status = frame[7]
     return block_id, status
 
 
@@ -79,7 +90,7 @@ def main():
         raise SystemExit("channel must be 1..12")
 
     payload = build_cal_payload(args.channel - 1, args.k_raw, args.b_raw)
-    frame = build_frame(CMD_WRITE_PARAM, payload)
+    frame = build_fixed_frame(CMD_WRITE_PARAM, BLOCK_CAL_DATA, payload)
 
     print(
         f"write calibration: CH{args.channel} k_raw={args.k_raw} "

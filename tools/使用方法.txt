@@ -1,3 +1,30 @@
 python .\tcp_stream_monitor.py --host 192.168.1.21 --bind 192.168.1.20 --type raw --duration 10
 
 python .\tcp_stream_monitor.py --host 192.168.1.21 --bind 192.168.1.20 --type converted --duration 10
+
+读取 RAM 日志快照：
+
+python .\read_log_snapshot.py --host 192.168.1.21 --bind 192.168.1.20
+
+enhanced：
+
+per_ch Sa/s     每个通道的采样率
+total Sa/s      所有通道总采样率
+net Mbps        TCP 网络吞吐量
+gap             当前周期丢失的采样组数量
+ovlp            当前周期重复/回退的采样组数量
+bad             当前周期错误帧数量
+grp             每帧包含多少组采样
+seq             最新数据帧序号
+status          当前周期状态
+常用运行方式：
+
+python tcp_stream_monitor_enhanced.py --host 192.168.1.21 --type raw
+
+保存 CSV：
+
+python tcp_stream_monitor_enhanced.py --host 192.168.1.21 --type raw --csv adc_log.csv
+
+显示实时曲线：
+
+python tcp_stream_monitor_enhanced.py --host 192.168.1.21 --type raw --plot

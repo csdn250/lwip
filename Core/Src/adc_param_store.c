@@ -289,6 +289,11 @@ uint8_t adc_param_store_is_network_dirty(void)
     return s_network_config_dirty;
 }
 
+void adc_param_store_clear_network_dirty(void)
+{
+    s_network_config_dirty = 0U;
+}
+
 uint8_t adc_param_store_apply_cal_param(const uint8_t *data,
                                         uint16_t len)
 {

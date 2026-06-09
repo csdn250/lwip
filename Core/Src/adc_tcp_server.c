@@ -1,6 +1,7 @@
 #include "adc_tcp_server.h"
 
 #include "SEGGER_RTT.h"
+#include "lwip.h"
 #include "lwip/err.h"
 #include "lwip/pbuf.h"
 #include "lwip/tcp.h"
@@ -9,6 +10,7 @@
 #include "adc_param_store.h"
 #include "adc_frame_builder.h"
 #include "dac_output_service.h"
+#include "app_log.h"
 
 #include <string.h>
 
@@ -38,6 +40,8 @@
 #define ADC_PROTO_RSP_RAW_DATA 0x81U
 #define ADC_PROTO_RSP_CONVERTED_DATA 0x82U
 
+#define ADC_LOG_CLEAR_ACTION_CLEAR 0x01U
+
 #define ADC_TCP_RX_BUF_SIZE 1500U
 #define ADC_PROTO_MAX_PAYLOAD_SIZE (ADC_TCP_RX_BUF_SIZE - ADC_PROTO_FRAME_OVERHEAD)
 
@@ -52,6 +56,11 @@
 #define ADC_STREAM_TCP_SEND_MARGIN 32U
 
 #define ADC_PROTO_RSP_DEBUG_STATUS 0x83U
+
+#define ADC_LOG_SNAPSHOT_VERSION 1U
+#define ADC_LOG_SNAPSHOT_MAX_RECORDS 8U
+#define ADC_LOG_SNAPSHOT_HEADER_BYTES 4U
+#define ADC_LOG_RECORD_WIRE_BYTES 16U
 
 #define DAC_PARAM_BYTES 14U
 
@@ -79,6 +88,10 @@ static uint16_t s_rx_len;
 /* 这些缓冲区比较大，放到静态区，避免函数调用时占用过多栈空间。 */
 static uint8_t s_tx_frame_buf[ADC_TCP_RX_BUF_SIZE];
 static uint8_t s_adc_stream_payload[ADC_FRAME_MAX_BYTES];
+static uint8_t s_fixed_cmd_payload[ADC_PROTO_FIXED_BLOCK_ID_SIZE +
+                                   ADC_PROTO_FIXED_DATA_CAPACITY];
+static uint8_t s_log_snapshot_payload[ADC_PROTO_FIXED_DATA_CAPACITY];
+static app_log_record_t s_log_snapshot_records[ADC_LOG_SNAPSHOT_MAX_RECORDS];
 static adc_acq_sample_t s_adc_stream_samples[ADC_FRAME_BATCH_GROUP_COUNT];
 
 /* ========================== Function Prototypes ======================== */
@@ -119,6 +132,14 @@ static err_t adc_tcp_server_send_frame(struct tcp_pcb *tpcb,
                                        const uint8_t *payload,
                                        uint16_t payload_len);
 
+static err_t adc_tcp_server_send_fixed_frame(struct tcp_pcb *tpcb,
+                                             uint8_t cmd,
+                                             uint16_t block_id,
+                                             const uint8_t *data,
+                                             uint16_t data_len);
+
+static uint8_t adc_tcp_server_is_fixed_cmd(uint8_t cmd);
+
 static void adc_tcp_server_apply_control_param(const uint8_t *data,
                                                uint16_t len);
 
@@ -153,6 +174,10 @@ static void adc_tcp_server_handle_write_param(struct tcp_pcb *tpcb,
                                               const uint8_t *payload,
                                               uint16_t payload_len);
 
+static void adc_tcp_server_handle_log_clear(struct tcp_pcb *tpcb,
+                                            const uint8_t *payload,
+                                            uint16_t payload_len);
+
 static void adc_tcp_server_handle_read_param(struct tcp_pcb *tpcb,
                                              const uint8_t *payload,
                                              uint16_t payload_len);
@@ -160,6 +185,12 @@ static void adc_tcp_server_handle_read_param(struct tcp_pcb *tpcb,
 static err_t adc_tcp_server_send_write_status(struct tcp_pcb *tpcb,
                                               uint16_t block_id,
                                               uint8_t status);
+
+static err_t adc_tcp_server_send_read_status(struct tcp_pcb *tpcb,
+                                             uint16_t block_id,
+                                             uint8_t status);
+static uint16_t adc_tcp_server_build_log_snapshot(uint8_t *payload,
+                                                  uint16_t max_len);
 
 static void adc_tcp_server_send_debug_status(void);
 
@@ -207,6 +238,21 @@ void adc_tcp_server_process(void)
     if (0U != s_adc_stream_enabled)
     {
         adc_tcp_server_pump_adc_stream();
+    }
+
+    if (NULL == s_client_pcb)
+    {
+        if ((0U != adc_param_store_is_network_dirty()) ||
+            (0U == MX_LWIP_IsNetworkConfigApplied()))
+        {
+            MX_LWIP_ApplyNetworkConfig();
+            adc_param_store_clear_network_dirty();
+            SEGGER_RTT_WriteString(0, "netif param applied\r\n");
+            app_log_record(APP_LOG_EVENT_NETIF_APPLIED,
+                           0U,
+                           0U,
+                           0U);
+        }
     }
 
 #if ADC_TCP_DEBUG_STATUS_ENABLE
@@ -258,6 +304,10 @@ static err_t adc_tcp_server_accept(void *arg,
     tcp_err(newpcb, adc_tcp_server_error);
 
     SEGGER_RTT_WriteString(0, "tcp accept\r\n");
+    app_log_record(APP_LOG_EVENT_TCP_ACCEPT,
+                   0U,
+                   0U,
+                   0U);
 
     return ERR_OK;
 }
@@ -299,6 +349,11 @@ static void adc_tcp_server_error(void *arg, err_t err)
     s_client_pcb = NULL;
     adc_tcp_server_disable_stream();
     s_rx_len = 0U;
+
+    app_log_record(APP_LOG_EVENT_TCP_ERROR,
+                   (uint16_t)err,
+                   0U,
+                   0U);
 }
 
 /* ========================= Connection Helpers ========================== */
@@ -320,6 +375,11 @@ static void adc_tcp_server_close_client(struct tcp_pcb *tpcb)
         s_client_pcb = NULL;
         adc_tcp_server_disable_stream();
         s_rx_len = 0U;
+
+        app_log_record(APP_LOG_EVENT_TCP_CLOSE,
+                       0U,
+                       0U,
+                       0U);
     }
 
     if (ERR_OK != tcp_close(tpcb))
@@ -338,8 +398,16 @@ static void adc_tcp_server_store_pbuf(struct tcp_pcb *tpcb, struct pbuf *p)
 
     if ((s_rx_len + copy_len) > ADC_TCP_RX_BUF_SIZE)
     {
+        uint16_t old_rx_len;
+
+        old_rx_len = s_rx_len;
         s_rx_len = 0U;
         SEGGER_RTT_WriteString(0, "rx buf overflow\r\n");
+
+        app_log_record(APP_LOG_EVENT_TCP_RX_OVERFLOW,
+                       0U,
+                       old_rx_len,
+                       copy_len);
     }
     else
     {
@@ -431,20 +499,78 @@ static err_t adc_tcp_server_send_frame(struct tcp_pcb *tpcb,
     return tcp_output(tpcb);
 }
 
+static err_t adc_tcp_server_send_fixed_frame(struct tcp_pcb *tpcb,
+                                             uint8_t cmd,
+                                             uint16_t block_id,
+                                             const uint8_t *data,
+                                             uint16_t data_len)
+{
+    uint16_t frame_len;
+    err_t err;
+
+    if (NULL == tpcb)
+    {
+        return ERR_ARG;
+    }
+
+    frame_len = adc_proto_build_fixed_frame(s_tx_frame_buf,
+                                            sizeof(s_tx_frame_buf),
+                                            cmd,
+                                            block_id,
+                                            data,
+                                            data_len);
+
+    if (0U == frame_len)
+    {
+        return ERR_VAL;
+    }
+
+    if (tcp_sndbuf(tpcb) < frame_len)
+    {
+        return ERR_MEM;
+    }
+
+    err = tcp_write(tpcb, s_tx_frame_buf, frame_len, TCP_WRITE_FLAG_COPY);
+    if (ERR_OK != err)
+    {
+        return err;
+    }
+
+    return tcp_output(tpcb);
+}
+
+static uint8_t adc_tcp_server_is_fixed_cmd(uint8_t cmd)
+{
+    if ((ADC_PROTO_CMD_WRITE_PARAM == cmd) ||
+        (ADC_PROTO_CMD_READ_PARAM == cmd) ||
+        (ADC_PROTO_CMD_HEARTBEAT == cmd))
+    {
+        return 1U;
+    }
+
+    return 0U;
+}
+
 static err_t adc_tcp_server_send_write_status(struct tcp_pcb *tpcb,
                                               uint16_t block_id,
                                               uint8_t status)
 {
-    uint8_t payload[3];
+    return adc_tcp_server_send_fixed_frame(tpcb,
+                                           ADC_PROTO_CMD_WRITE_PARAM,
+                                           block_id,
+                                           &status,
+                                           sizeof(status));
+}
 
-    payload[0] = (uint8_t)(block_id >> 8);
-    payload[1] = (uint8_t)(block_id & 0xFFU);
-    payload[2] = status;
-
-    return adc_tcp_server_send_frame(tpcb,
-                                     ADC_PROTO_CMD_WRITE_PARAM,
-                                     payload,
-                                     sizeof(payload));
+static err_t adc_tcp_server_send_read_status(struct tcp_pcb *tpcb,
+                                             uint16_t block_id,
+                                             uint8_t status)
+{
+    return adc_tcp_server_send_fixed_frame(tpcb,
+                                           ADC_PROTO_CMD_READ_PARAM,
+                                           block_id,
+                                           &status,
+                                           sizeof(status));
 }
 
 static uint8_t adc_tcp_server_normalize_stream_type(uint8_t stream_type)
@@ -464,6 +590,10 @@ static void adc_tcp_server_start_stream(uint8_t stream_type)
     s_adc_stream_enabled = 1U;
 
     SEGGER_RTT_WriteString(0, "adc stream start\r\n");
+    app_log_record(APP_LOG_EVENT_ADC_STREAM_START,
+                   0U,
+                   0U,
+                   0U);
 }
 
 static void adc_tcp_server_stop_stream(void)
@@ -471,6 +601,10 @@ static void adc_tcp_server_stop_stream(void)
     adc_tcp_server_disable_stream();
 
     SEGGER_RTT_WriteString(0, "adc stream stop\r\n");
+    app_log_record(APP_LOG_EVENT_ADC_STREAM_STOP,
+                   0U,
+                   0U,
+                   0U);
 }
 
 static void adc_tcp_server_disable_stream(void)
@@ -498,7 +632,6 @@ static void adc_tcp_server_apply_control_param(const uint8_t *data,
 
 static void adc_tcp_server_parse_rx(struct tcp_pcb *tpcb)
 {
-    uint16_t payload_len;
     uint16_t frame_len;
 
     /*
@@ -515,38 +648,75 @@ static void adc_tcp_server_parse_rx(struct tcp_pcb *tpcb)
             continue;
         }
 
-        payload_len = adc_proto_payload_len(s_rx_buf);
-        if (payload_len > ADC_PROTO_MAX_PAYLOAD_SIZE)
+        if (0U != adc_tcp_server_is_fixed_cmd(s_rx_buf[2]))
         {
-            s_rx_len = 0U;
-            SEGGER_RTT_WriteString(0, "proto frame too large\r\n");
-            return;
-        }
+            uint16_t data_len;
+            uint16_t block_id;
+            uint8_t bad_cmd;
 
-        frame_len = (uint16_t)(payload_len + ADC_PROTO_FRAME_OVERHEAD);
+            frame_len = ADC_PROTO_FIXED_FRAME_SIZE;
 
-        if (s_rx_len < frame_len)
-        {
-            return; // 未接收完整等待下一次recv
-        }
+            if (s_rx_len < frame_len)
+            {
+                return;
+            }
 
-        if (0U == adc_proto_is_frame_valid(s_rx_buf,
-                                           frame_len,
-                                           ADC_PROTO_MAX_PAYLOAD_SIZE))
-        {
-            // 误判出来的假帧头，往后寻找真的帧头
-            adc_tcp_server_drop_one_rx_byte();
-            SEGGER_RTT_WriteString(0, "proto bad frame\r\n");
+            bad_cmd = s_rx_buf[2];
+
+            if (0U == adc_proto_is_fixed_frame_valid(s_rx_buf))
+            {
+                adc_tcp_server_drop_one_rx_byte();
+                SEGGER_RTT_WriteString(0, "proto bad fixed frame\r\n");
+                app_log_record(APP_LOG_EVENT_TCP_BAD_FRAME,
+                               bad_cmd,
+                               s_rx_len,
+                               0U);
+                continue;
+            }
+
+            data_len = adc_proto_fixed_data_len(s_rx_buf);
+            block_id = adc_proto_fixed_block_id(s_rx_buf);
+
+            if ((uint16_t)(data_len + ADC_PROTO_FIXED_BLOCK_ID_SIZE) >
+                sizeof(s_fixed_cmd_payload))
+            {
+                adc_tcp_server_remove_frame(frame_len);
+                SEGGER_RTT_WriteString(0, "fixed payload too large\r\n");
+                app_log_record(APP_LOG_EVENT_TCP_BAD_FRAME,
+                               s_rx_buf[2],
+                               data_len,
+                               sizeof(s_fixed_cmd_payload));
+                continue;
+            }
+
+            s_fixed_cmd_payload[0] = (uint8_t)(block_id >> 8);
+            s_fixed_cmd_payload[1] = (uint8_t)(block_id & 0xFFU);
+
+            if (data_len > 0U)
+            {
+                memcpy(&s_fixed_cmd_payload[2],
+                       &s_rx_buf[ADC_PROTO_FIXED_DATA_OFFSET + ADC_PROTO_FIXED_BLOCK_ID_SIZE],
+                       data_len);
+            }
+
+            adc_tcp_server_handle_frame(tpcb,
+                                        s_rx_buf[2],
+                                        s_fixed_cmd_payload,
+                                        (uint16_t)(data_len + ADC_PROTO_FIXED_BLOCK_ID_SIZE));
+
+            // 将已处理的帧从接收缓冲区移除
+            adc_tcp_server_remove_frame(frame_len);
             continue;
         }
 
-        adc_tcp_server_handle_frame(tpcb,
-                                    s_rx_buf[2],
-                                    &s_rx_buf[ADC_PROTO_HEADER_SIZE],
-                                    payload_len);
-
-        // 将已处理的帧从接收缓冲区移除
-        adc_tcp_server_remove_frame(frame_len);
+        /*
+         * 现在上位机下发的普通命令都应使用固定 150 字节帧。
+         * 如果这里出现未知 cmd，不能继续按 LEN 等待，否则一条错误短帧
+         * 可能把后续正确命令全部堵在接收缓冲区后面。
+         */
+        adc_tcp_server_drop_one_rx_byte();
+        SEGGER_RTT_WriteString(0, "proto drop unknown rx cmd\r\n");
+        continue;
     }
 }
 
@@ -566,11 +736,18 @@ static void adc_tcp_server_handle_frame(struct tcp_pcb *tpcb,
 
     if (ADC_PROTO_CMD_HEARTBEAT == cmd)
     {
+        uint8_t status = ADC_PROTO_WRITE_STATUS_OK;
+
         SEGGER_RTT_WriteString(0, "proto heartbeat\r\n");
-        (void)adc_tcp_server_send_frame(tpcb,
-                                        ADC_PROTO_CMD_HEARTBEAT,
-                                        NULL,
-                                        0U);
+        app_log_record(APP_LOG_EVENT_PROTO_HEARTBEAT,
+                       0U,
+                       0U,
+                       0U);
+        (void)adc_tcp_server_send_fixed_frame(tpcb,
+                                              ADC_PROTO_CMD_HEARTBEAT,
+                                              0U,
+                                              &status,
+                                              sizeof(status));
     }
     else if (ADC_PROTO_CMD_WRITE_PARAM == cmd)
     {
@@ -586,6 +763,37 @@ static void adc_tcp_server_handle_frame(struct tcp_pcb *tpcb,
     }
 }
 
+static void adc_tcp_server_handle_log_clear(struct tcp_pcb *tpcb,
+                                            const uint8_t *payload,
+                                            uint16_t payload_len)
+{
+    uint16_t block_id;
+    uint8_t status;
+
+    block_id = ADC_PARAM_BLOCK_LOG_SNAPSHOT;
+    status = ADC_PROTO_WRITE_STATUS_BAD_LEN;
+
+    if ((3U == payload_len) &&
+        (ADC_LOG_CLEAR_ACTION_CLEAR == payload[2]))
+    {
+        app_log_clear();
+        app_log_record(APP_LOG_EVENT_LOG_CLEARED,
+                       0U,
+                       0U,
+                       0U);
+        status = ADC_PROTO_WRITE_STATUS_OK;
+    }
+
+    (void)adc_tcp_server_send_write_status(tpcb,
+                                           block_id,
+                                           status);
+
+    app_log_record(APP_LOG_EVENT_PARAM_WRITE_RESULT,
+                   status,
+                   block_id,
+                   (payload_len >= 2U) ? (uint32_t)(payload_len - 2U) : 0U);
+}
+
 static void adc_tcp_server_handle_write_param(struct tcp_pcb *tpcb,
                                               const uint8_t *payload,
                                               uint16_t payload_len)
@@ -596,6 +804,10 @@ static void adc_tcp_server_handle_write_param(struct tcp_pcb *tpcb,
     uint8_t write_status;
 
     SEGGER_RTT_WriteString(0, "proto write param\r\n");
+    app_log_record(APP_LOG_EVENT_PROTO_WRITE_PARAM,
+                   0U,
+                   payload_len,
+                   0U);
 
     if (payload_len < 2U)
     {
@@ -607,6 +819,11 @@ static void adc_tcp_server_handle_write_param(struct tcp_pcb *tpcb,
     }
 
     block_id = (uint16_t)(((uint16_t)payload[0] << 8) | payload[1]);
+    if (ADC_PARAM_BLOCK_LOG_SNAPSHOT == block_id)
+    {
+        adc_tcp_server_handle_log_clear(tpcb, payload, payload_len);
+        return;
+    }
     block = adc_param_store_find_block(block_id);
     if (NULL == block)
     {
@@ -669,6 +886,49 @@ static void adc_tcp_server_handle_write_param(struct tcp_pcb *tpcb,
     (void)adc_tcp_server_send_write_status(tpcb,
                                            block_id,
                                            write_status);
+
+    app_log_record(APP_LOG_EVENT_PARAM_WRITE_RESULT,
+                   write_status,
+                   block_id,
+                   write_len);
+}
+
+static uint16_t adc_tcp_server_build_log_snapshot(uint8_t *payload,
+                                                  uint16_t max_len)
+{
+    uint16_t index;
+    uint16_t count;
+    uint16_t i;
+
+    if ((NULL == payload) || (max_len < ADC_LOG_SNAPSHOT_HEADER_BYTES))
+    {
+        return 0U;
+    }
+
+    count = app_log_snapshot(s_log_snapshot_records,
+                             ADC_LOG_SNAPSHOT_MAX_RECORDS);
+
+    index = 0U;
+    payload[index++] = ADC_LOG_SNAPSHOT_VERSION;
+    payload[index++] = (uint8_t)count;
+    payload[index++] = ADC_LOG_RECORD_WIRE_BYTES;
+    payload[index++] = 0U;
+
+    for (i = 0U; i < count; i++)
+    {
+        if ((uint16_t)(index + ADC_LOG_RECORD_WIRE_BYTES) > max_len)
+        {
+            break;
+        }
+
+        adc_proto_put_u32_be(payload, &index, s_log_snapshot_records[i].tick_ms);
+        adc_proto_put_u16_be(payload, &index, s_log_snapshot_records[i].event);
+        adc_proto_put_u16_be(payload, &index, s_log_snapshot_records[i].arg0);
+        adc_proto_put_u32_be(payload, &index, s_log_snapshot_records[i].arg1);
+        adc_proto_put_u32_be(payload, &index, s_log_snapshot_records[i].arg2);
+    }
+
+    return index;
 }
 
 static void adc_tcp_server_handle_read_param(struct tcp_pcb *tpcb,
@@ -677,43 +937,61 @@ static void adc_tcp_server_handle_read_param(struct tcp_pcb *tpcb,
 {
     adc_param_block_t *block;
     uint16_t block_id;
-    uint16_t response_len;
-    uint8_t response_payload[ADC_TCP_RX_BUF_SIZE];
 
     SEGGER_RTT_WriteString(0, "proto read param\r\n");
+    app_log_record(APP_LOG_EVENT_PROTO_READ_PARAM,
+                   0U,
+                   payload_len,
+                   0U);
 
     if (2U != payload_len)
     {
         SEGGER_RTT_WriteString(0, "read param bad len\r\n");
+        (void)adc_tcp_server_send_read_status(tpcb,
+                                              0xFFFFU,
+                                              ADC_PROTO_WRITE_STATUS_BAD_LEN);
         return;
     }
 
     block_id = (uint16_t)(((uint16_t)payload[0] << 8) | payload[1]);
+    if (ADC_PARAM_BLOCK_LOG_SNAPSHOT == block_id)
+    {
+        uint16_t log_len;
+
+        log_len = adc_tcp_server_build_log_snapshot(s_log_snapshot_payload,
+                                                    sizeof(s_log_snapshot_payload));
+
+        (void)adc_tcp_server_send_fixed_frame(tpcb,
+                                              ADC_PROTO_CMD_READ_PARAM,
+                                              block_id,
+                                              s_log_snapshot_payload,
+                                              log_len);
+        return;
+    }
     block = adc_param_store_find_block(block_id);
     if (NULL == block)
     {
         SEGGER_RTT_WriteString(0, "read param not found\r\n");
+        (void)adc_tcp_server_send_read_status(tpcb,
+                                              block_id,
+                                              ADC_PROTO_WRITE_STATUS_NOT_FOUND);
         return;
     }
 
-    response_len = (uint16_t)(block->len + 2U);
-    if (response_len > ADC_PROTO_MAX_PAYLOAD_SIZE)
+    if (block->len > ADC_PROTO_FIXED_DATA_CAPACITY)
     {
         SEGGER_RTT_WriteString(0, "read param too long\r\n");
+        (void)adc_tcp_server_send_read_status(tpcb,
+                                              block_id,
+                                              ADC_PROTO_WRITE_STATUS_TOO_LONG);
         return;
     }
 
-    response_payload[0] = (uint8_t)(block_id >> 8);
-    response_payload[1] = (uint8_t)(block_id & 0xFFU);
-    if (block->len > 0U)
-    {
-        memcpy(&response_payload[2], block->data, block->len);
-    }
-
-    (void)adc_tcp_server_send_frame(tpcb,
-                                    ADC_PROTO_CMD_READ_PARAM,
-                                    response_payload,
-                                    response_len);
+    (void)adc_tcp_server_send_fixed_frame(tpcb,
+                                          ADC_PROTO_CMD_READ_PARAM,
+                                          block_id,
+                                          block->data,
+                                          block->len);
 }
 
 static void adc_tcp_server_send_debug_status(void)

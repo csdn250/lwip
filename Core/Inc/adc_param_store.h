@@ -22,6 +22,8 @@
 #define ADC_PARAM_BLOCK_DA_CH3 0x000BU
 #define ADC_PARAM_BLOCK_DA_CH4 0x000CU
 
+#define ADC_PARAM_BLOCK_LOG_SNAPSHOT 0x000DU
+
 typedef struct
 {
     uint16_t block_id;
@@ -54,5 +56,7 @@ uint8_t adc_param_store_apply_network_param(uint16_t block_id,
                                             uint16_t len);
 
 uint8_t adc_param_store_is_network_dirty(void);
+
+void adc_param_store_clear_network_dirty(void);
 
 #endif /*__ADC_PARAM_STORE_H*/

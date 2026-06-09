@@ -24,6 +24,12 @@ FRAME_HEADER_LEN = 5
 FRAME_CRC_LEN = 4
 FRAME_EOF_LEN = 2
 FRAME_OVERHEAD = FRAME_HEADER_LEN + FRAME_CRC_LEN + FRAME_EOF_LEN
+FIXED_FRAME_LEN = 150
+FIXED_CRC_OFFSET = 144
+FIXED_EOF_OFFSET = 148
+FIXED_DATA_OFFSET = 5
+FIXED_BLOCK_ID_SIZE = 2
+FIXED_DATA_CAPACITY = FIXED_CRC_OFFSET - FIXED_DATA_OFFSET - FIXED_BLOCK_ID_SIZE
 
 ADC_PAYLOAD_HEADER_LEN = 20
 ADC_FRAME_MAGIC = 0x41444331
@@ -49,10 +55,31 @@ def build_frame(cmd: int, payload: bytes = b"") -> bytes:
     return body + crc.to_bytes(4, "big") + EOF
 
 
-def build_control_payload(enable: bool, stream_cmd: int) -> bytes:
+def build_fixed_frame(cmd: int, block_id: int, data: bytes = b"") -> bytes:
+    if len(data) > FIXED_DATA_CAPACITY:
+        raise ValueError(f"fixed frame data too long: {len(data)}")
+
+    frame = bytearray(FIXED_FRAME_LEN)
+    frame[0:2] = SOF
+    frame[2] = cmd & 0xFF
+    frame[3:5] = len(data).to_bytes(2, "big")
+    frame[5:7] = block_id.to_bytes(2, "big")
+    frame[7 : 7 + len(data)] = data
+
+    crc = crc32(bytes(frame[:FIXED_CRC_OFFSET]))
+    frame[FIXED_CRC_OFFSET : FIXED_CRC_OFFSET + 4] = crc.to_bytes(4, "big")
+    frame[FIXED_EOF_OFFSET : FIXED_EOF_OFFSET + 2] = EOF
+    return bytes(frame)
+
+
+def build_control_data(enable: bool, stream_cmd: int) -> bytes:
     start_stop = 1 if enable else 0
-    # block_id(2) + control[8]
-    return bytes([0x00, BLOCK_CONTROL, start_stop, stream_cmd, 0, 0, 0, 0, 0, 0])
+    # control[8]: enable + stream type + reserved bytes
+    return bytes([start_stop, stream_cmd, 0, 0, 0, 0, 0, 0])
+
+
+def is_fixed_cmd(cmd: int) -> bool:
+    return cmd in (CMD_WRITE_PARAM, CMD_READ_PARAM, CMD_HEARTBEAT)
 
 
 def parse_one_frame(buf: bytearray):
@@ -67,7 +94,40 @@ def parse_one_frame(buf: bytearray):
     if len(buf) < FRAME_OVERHEAD:
         return None
 
+    cmd = buf[2]
     payload_len = (buf[3] << 8) | buf[4]
+
+    if is_fixed_cmd(cmd):
+        frame_len = FIXED_FRAME_LEN
+
+        if len(buf) < frame_len:
+            return None
+
+        frame = bytes(buf[:frame_len])
+        del buf[:frame_len]
+
+        if frame[FIXED_EOF_OFFSET : FIXED_EOF_OFFSET + 2] != EOF:
+            return {"ok": False, "reason": "bad_fixed_eof", "raw": frame}
+
+        if payload_len > FIXED_DATA_CAPACITY:
+            return {"ok": False, "reason": "bad_fixed_len", "raw": frame}
+
+        crc_recv = int.from_bytes(frame[FIXED_CRC_OFFSET : FIXED_CRC_OFFSET + 4], "big")
+        crc_calc = crc32(frame[:FIXED_CRC_OFFSET])
+        if crc_recv != crc_calc:
+            return {"ok": False, "reason": "bad_fixed_crc", "raw": frame}
+
+        block_id = int.from_bytes(frame[FIXED_DATA_OFFSET : FIXED_DATA_OFFSET + 2], "big")
+        data_start = FIXED_DATA_OFFSET + FIXED_BLOCK_ID_SIZE
+        data = frame[data_start : data_start + payload_len]
+
+        return {
+            "ok": True,
+            "cmd": cmd,
+            "payload": block_id.to_bytes(2, "big") + data,
+            "raw_len": frame_len,
+        }
+
     frame_len = FRAME_OVERHEAD + payload_len
 
     if len(buf) < frame_len:
@@ -86,7 +146,7 @@ def parse_one_frame(buf: bytearray):
 
     return {
         "ok": True,
-        "cmd": frame[2],
+        "cmd": cmd,
         "payload": frame[FRAME_HEADER_LEN : FRAME_HEADER_LEN + payload_len],
         "raw_len": frame_len,
     }
@@ -176,8 +236,8 @@ def main():
     args = parser.parse_args()
 
     stream_cmd = CMD_RAW_DATA if args.type == "raw" else CMD_CONVERTED_DATA
-    start_frame = build_frame(CMD_WRITE_PARAM, build_control_payload(True, stream_cmd))
-    stop_frame = build_frame(CMD_WRITE_PARAM, build_control_payload(False, stream_cmd))
+    start_frame = build_fixed_frame(CMD_WRITE_PARAM, BLOCK_CONTROL, build_control_data(True, stream_cmd))
+    stop_frame = build_fixed_frame(CMD_WRITE_PARAM, BLOCK_CONTROL, build_control_data(False, stream_cmd))
 
     rx_buf = bytearray()
     total_bytes = 0
