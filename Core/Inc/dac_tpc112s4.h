@@ -13,6 +13,4 @@ void dac_tpc112s4_write_all(uint16_t ch1,
                             uint16_t ch3,
                             uint16_t ch4);
 
-void dac_tpc112s4_test_pattern(void);
-
 #endif /* __DAC_TPC112S4_H */

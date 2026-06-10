@@ -167,19 +167,15 @@ void adc_tcp_server_init(void);
 void adc_tcp_server_process(void);
 uint8_t adc_tcp_server_has_client(void);
 
-/* lwIP TCP 回调函数 */
+/* TCP 生命周期：监听、连接、断开、错误 */
 static err_t adc_tcp_server_accept(void *arg,
                                    struct tcp_pcb *newpcb,
                                    err_t err);
-
 static err_t adc_tcp_server_recv(void *arg,
                                  struct tcp_pcb *tpcb,
                                  struct pbuf *p,
                                  err_t err);
-
 static void adc_tcp_server_error(void *arg, err_t err);
-
-/* 连接管理函数 */
 static void adc_tcp_server_close_client(struct tcp_pcb *tpcb);
 
 /* 接收缓冲区操作函数 */
@@ -187,25 +183,27 @@ static void adc_tcp_server_store_pbuf(struct tcp_pcb *tpcb, struct pbuf *p);
 static void adc_tcp_server_drop_one_rx_byte(void);
 static void adc_tcp_server_remove_frame(uint16_t frame_len);
 
-/* 协议帧构建和发送函数 */
+/* TX 协议发送：普通帧、固定 150 字节帧、状态回复 */
 static err_t adc_tcp_server_send_frame(struct tcp_pcb *tpcb,
                                        uint8_t cmd,
                                        const uint8_t *payload,
                                        uint16_t payload_len);
-
 static err_t adc_tcp_server_send_fixed_frame(struct tcp_pcb *tpcb,
                                              uint8_t cmd,
                                              uint16_t block_id,
                                              const uint8_t *data,
                                              uint16_t data_len);
-
+static err_t adc_tcp_server_send_write_status(struct tcp_pcb *tpcb,
+                                              uint16_t block_id,
+                                              uint8_t status);
+static err_t adc_tcp_server_send_read_status(struct tcp_pcb *tpcb,
+                                             uint16_t block_id,
+                                             uint8_t status);
 static uint8_t adc_tcp_server_is_fixed_cmd(uint8_t cmd);
 
 /* 协议命令处理函数 */
 static void adc_tcp_server_apply_control_param(const uint8_t *data,
                                                uint16_t len);
-
-static uint8_t adc_tcp_server_normalize_stream_type(uint8_t stream_type);
 static void adc_tcp_server_start_stream(uint8_t stream_type);
 static void adc_tcp_server_stop_stream(void);
 static void adc_tcp_server_disable_stream(void);
@@ -236,14 +234,6 @@ static void adc_tcp_server_handle_log_clear(struct tcp_pcb *tpcb,
 static void adc_tcp_server_handle_read_param(struct tcp_pcb *tpcb,
                                              const uint8_t *payload,
                                              uint16_t payload_len);
-
-static err_t adc_tcp_server_send_write_status(struct tcp_pcb *tpcb,
-                                              uint16_t block_id,
-                                              uint8_t status);
-
-static err_t adc_tcp_server_send_read_status(struct tcp_pcb *tpcb,
-                                             uint16_t block_id,
-                                             uint8_t status);
 
 #if ADC_TCP_DEBUG_STATUS_ENABLE
 static void adc_tcp_server_send_debug_status(void);
@@ -856,30 +846,20 @@ static err_t adc_tcp_server_send_read_status(struct tcp_pcb *tpcb,
 }
 
 /**
- * @brief 规范化 ADC 数据流类型
- * @param[in] stream_type: 原始流类型
- * @retval uint8_t 规范化后的流类型
- *
- * @note 如果是转换类型则返回转换，否则返回原始
- */
-static uint8_t adc_tcp_server_normalize_stream_type(uint8_t stream_type)
-{
-    if (ADC_STREAM_TYPE_CONVERTED == stream_type)
-    {
-        return ADC_STREAM_TYPE_CONVERTED;
-    }
-
-    return ADC_STREAM_TYPE_RAW;
-}
-
-/**
  * @brief 启动 ADC 数据流
  * @param[in] stream_type: 数据流类型（原始或转换）
  * @retval None
  */
 static void adc_tcp_server_start_stream(uint8_t stream_type)
 {
-    s_adc_stream_type = adc_tcp_server_normalize_stream_type(stream_type);
+    if (ADC_STREAM_TYPE_CONVERTED == stream_type)
+    {
+        s_adc_stream_type = ADC_STREAM_TYPE_CONVERTED;
+    }
+    else
+    {
+        s_adc_stream_type = ADC_STREAM_TYPE_RAW;
+    }
     s_adc_stream_seq = 0U; // 重置序列号
     s_adc_stream_enabled = 1U;
 

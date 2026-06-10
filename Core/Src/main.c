@@ -26,6 +26,9 @@ static void MX_IWDG1_Init(void);
 
 /* ================== Module State ================== */
 
+#define APP_IWDG_REFRESH_INTERVAL_MS 100U
+#define APP_WATCHDOG_DISABLED_LOG_INTERVAL_MS 1000U
+
 // 看门狗句柄
 static IWDG_HandleTypeDef hiwdg1;
 
@@ -39,21 +42,16 @@ static IWDG_HandleTypeDef hiwdg1;
 #define APP_RESET_CAUSE_LPWR1 (1UL << 6) // 低功耗模式复位1
 #define APP_RESET_CAUSE_LPWR2 (1UL << 7) // 低功耗模式复位2
 
-// 主循环监控计数器
-static uint32_t s_loop_count = 0U;
-
-// DAC 级联模式状态追踪
-static uint8_t s_prev_streaming_state = 0U;
-
 // 看门狗喂狗失败计数（用于调试）
 static uint32_t s_iwdg_refresh_fail_count = 0U;
+static uint32_t s_iwdg_last_refresh_tick = 0U;
+static uint32_t s_watchdog_disabled_last_log_tick = 0U;
 
 /* ================== Function Prototypes (Internal) ================== */
 
 static void App_LogResetCause(void);
-static HAL_StatusTypeDef App_InitializeAllPeripherals(void);
-static void App_PrintStartupBanner(void);
-static void App_MonitorLoopHealth(void);
+static void App_RefreshWatchdog(void);
+
 
 /* ================== PUBLIC MAIN FUNCTION ================== */
 
@@ -103,12 +101,12 @@ int main(void)
   // 从 EEPROM 加载配置，如果失败则使用默认值
   if (HAL_OK == device_config_load_all())
   {
-    SEGGER_RTT_WriteString(0, "✓ Device config loaded from EEPROM\r\n");
+    SEGGER_RTT_WriteString(0, "[OK] Device config loaded from EEPROM\r\n");
     app_log_key_event(APP_LOG_EVENT_CONFIG_LOADED, "config loaded");
   }
   else
   {
-    SEGGER_RTT_WriteString(0, "⚠ Device config not found, using defaults\r\n");
+    SEGGER_RTT_WriteString(0, "[WARN] Device config not found, using defaults\r\n");
     app_log_key_event(APP_LOG_EVENT_CONFIG_DEFAULT, "config default");
   }
 
@@ -136,17 +134,10 @@ int main(void)
   // ====== Stage 8: Watchdog Timer ======
   // 看门狗必须最后初始化，防止初始化过程被看门狗中断
   MX_IWDG1_Init();
-  SEGGER_RTT_WriteString(0, "✓ Watchdog timer initialized (~4s timeout)\r\n");
+  SEGGER_RTT_WriteString(0, "[OK] Watchdog timer initialized (~4s timeout)\r\n");
 
   // ====== Stage 9: System Ready ======
-  App_PrintStartupBanner(); // 打印启动信息
   app_log_key_event(APP_LOG_EVENT_SYSTEM_READY, "system startup complete");
-
-  s_prev_streaming_state = 0U; // 初始化状态追踪
-
-  // ===================================
-  // ========== MAIN LOOP =============
-  // ===================================
 
   while (1)
   {
@@ -160,82 +151,17 @@ int main(void)
     // ③ DAC 输出处理（基础）
     dac_output_service_process();
 
-    // ④ DAC 级联模式
-    // 当 TCP 流不活跃时，DAC 直接消耗 ADC 采样
-    // 当 TCP 流活跃时，TCP 已负责发送 ADC 数据，DAC 不再消耗
-    uint8_t current_streaming = adc_tcp_server_is_streaming();
-
-    // 检测状态变化
-    if (s_prev_streaming_state != current_streaming)
-    {
-      if (0U == current_streaming)
-      {
-        SEGGER_RTT_WriteString(0, "[STATE] TCP streaming stopped, switching to cascade mode\r\n");
-        app_log_record(APP_LOG_EVENT_TCP_STREAM_STOPPED, 0U, 0U, 0U);
-      }
-      else
-      {
-        SEGGER_RTT_WriteString(0, "[STATE] TCP streaming started, disabling cascade mode\r\n");
-        app_log_record(APP_LOG_EVENT_TCP_STREAM_STARTED, 0U, 0U, 0U);
-      }
-      s_prev_streaming_state = current_streaming;
-    }
-
-    // 只在非流模式下调用级联处理
-    if (0U == current_streaming)
+    // 只在非 TCP 数据流模式下允许 DAC 级联消费 ADC 采样。
+    if (0U == adc_tcp_server_is_streaming())
     {
       dac_output_service_process_adc_cascade();
     }
 
-    // ⑤ UDP 发现（仅在无 TCP 连接时广播）
     udp_discovery_process();
 
-    // ⑥ 看门狗喂狗
-    // 看门狗超时约 4 秒，必须频繁刷新
-    // 如果喂狗被禁用（通过 TCP 命令），记录警告但不停止主循环
-    if (0U != adc_tcp_server_is_watchdog_feed_enabled())
-    {
-      if (HAL_IWDG_Refresh(&hiwdg1) != HAL_OK)
-      {
-        s_iwdg_refresh_fail_count++;
-        SEGGER_RTT_printf(0, "✗ Watchdog refresh failed (count: %u)\r\n",
-                          s_iwdg_refresh_fail_count);
-        app_log_record(APP_LOG_EVENT_IWDG_REFRESH_FAILED,
-                       (uint16_t)s_iwdg_refresh_fail_count,
-                       0U, 0U);
-
-        // 如果连续失败，触发错误处理
-        if (s_iwdg_refresh_fail_count > 3U)
-        {
-          Error_Handler();
-        }
-      }
-      else
-      {
-        // 清空失败计数（看门狗恢复正常）
-        if (s_iwdg_refresh_fail_count > 0U)
-        {
-          s_iwdg_refresh_fail_count = 0U;
-          SEGGER_RTT_WriteString(0, "✓ Watchdog refresh recovered\r\n");
-        }
-      }
-    }
-    else
-    {
-      // 看门狗喂狗被禁用（调试用）
-      if ((s_loop_count % 5000U) == 0U) // 每 5000 次循环输出一次
-      {
-        SEGGER_RTT_WriteString(0, "⚠ Warning: Watchdog feed is disabled\r\n");
-      }
-    }
-
-    // ⑦ 循环健康监控（定期输出系统状态）
-    App_MonitorLoopHealth();
-
-    s_loop_count++;
+    App_RefreshWatchdog();
   }
 
-  return 0; // 不会执行到这里
 }
 
 /* ================== PRIVATE FUNCTIONS ================== */
@@ -301,82 +227,49 @@ static void App_LogResetCause(void)
 }
 
 /**
- * @brief 初始化所有外设
- * @details 集中管理所有外设初始化，便于后续添加新模块
- * @retval HAL_StatusTypeDef
+ * @brief 定时刷新独立看门狗
+ * @details 主循环每轮调用本函数，但函数内部按时间间隔限频，避免每轮都访问 IWDG。
  */
-static HAL_StatusTypeDef App_InitializeAllPeripherals(void)
+static void App_RefreshWatchdog(void)
 {
-  // 此函数在这个版本中未使用（保留用于未来扩展）
-  // 未来可以实现模块表机制，动态初始化各模块
-  return HAL_OK;
-}
+  uint32_t now_tick;
 
-/**
- * @brief 打印启动横幅
- * @details 输出系统配置和就绪状态
- * @retval None
- */
-static void App_PrintStartupBanner(void)
-{
-  SEGGER_RTT_WriteString(0, "\r\n");
-  SEGGER_RTT_WriteString(0, "╔════════════════════════════════════════════╗\r\n");
-  SEGGER_RTT_WriteString(0, "║      ADC Data Acquisition System Ready     ║\r\n");
-  SEGGER_RTT_WriteString(0, "╚════════════════════════════════════════════╝\r\n");
-  SEGGER_RTT_WriteString(0, "\r\n");
+  now_tick = HAL_GetTick();
 
-  SEGGER_RTT_WriteString(0, "System Information:\r\n");
-  SEGGER_RTT_WriteString(0, "  ├─ CPU Clock:     400 MHz\r\n");
-  SEGGER_RTT_WriteString(0, "  ├─ TCP Server:    Port 8080\r\n");
-  SEGGER_RTT_WriteString(0, "  ├─ ADC Channels:  3 (ADC1/2/3)\r\n");
-  SEGGER_RTT_WriteString(0, "  ├─ DAC Channels:  4 (Output)\r\n");
-  SEGGER_RTT_WriteString(0, "  ├─ Watchdog:      ~4 seconds timeout\r\n");
-  SEGGER_RTT_WriteString(0, "  └─ Storage:       EEPROM + SDRAM\r\n");
-  SEGGER_RTT_WriteString(0, "\r\n");
+  if (0U == adc_tcp_server_is_watchdog_feed_enabled())
+  {
+    if ((now_tick - s_watchdog_disabled_last_log_tick) >=
+        APP_WATCHDOG_DISABLED_LOG_INTERVAL_MS)
+    {
+      s_watchdog_disabled_last_log_tick = now_tick;
+      SEGGER_RTT_WriteString(0, "watchdog feed disabled\r\n");
+    }
+    return;
+  }
 
-  SEGGER_RTT_WriteString(0, "Network Status:\r\n");
-  SEGGER_RTT_WriteString(0, "  ├─ LWIP:          Initialized\r\n");
-  SEGGER_RTT_WriteString(0, "  ├─ UDP Discovery: Listening\r\n");
-  SEGGER_RTT_WriteString(0, "  └─ TCP Listener:  Waiting for clients...\r\n");
-  SEGGER_RTT_WriteString(0, "\r\n");
-
-  SEGGER_RTT_WriteString(0, "Ready for operation. Connect via TCP:8080\r\n");
-  SEGGER_RTT_WriteString(0, "═══════════════════════════════════════════════\r\n\r\n");
-}
-
-/**
- * @brief 主循环健康监控
- * @details 定期输出系统运行状态（调试用）
- * @retval None
- */
-static void App_MonitorLoopHealth(void)
-{
-#define MONITOR_INTERVAL 50000U // 每 50000 次循环输出一次
-
-  // 避免频繁输出，每 MONITOR_INTERVAL 次循环输出一次
-  if ((s_loop_count % MONITOR_INTERVAL) != 0U)
+  if ((now_tick - s_iwdg_last_refresh_tick) < APP_IWDG_REFRESH_INTERVAL_MS)
   {
     return;
   }
 
-  // 采集当前系统状态
-  uint8_t has_client = adc_tcp_server_has_client();
-  uint8_t is_streaming = adc_tcp_server_is_streaming();
-  uint8_t iwdg_enabled = adc_tcp_server_is_watchdog_feed_enabled();
+  s_iwdg_last_refresh_tick = now_tick;
 
-  // 输出系统状态
-  SEGGER_RTT_printf(0, "[HEALTH] Loop: %u | Client: %u | Stream: %u | IWDG: %u\r\n",
-                    (unsigned int)s_loop_count,
-                    has_client,
-                    is_streaming,
-                    iwdg_enabled);
-
-  // 输出看门狗失败计数（如果有）
-  if (s_iwdg_refresh_fail_count > 0U)
+  if (HAL_IWDG_Refresh(&hiwdg1) != HAL_OK)
   {
-    SEGGER_RTT_printf(0, "         IWDG Fail Count: %u\r\n",
-                      (unsigned int)s_iwdg_refresh_fail_count);
+    s_iwdg_refresh_fail_count++;
+    app_log_record(APP_LOG_EVENT_IWDG_REFRESH_FAILED,
+                   (uint16_t)s_iwdg_refresh_fail_count,
+                   0U,
+                   0U);
+
+    if (s_iwdg_refresh_fail_count > 3U)
+    {
+      Error_Handler();
+    }
+    return;
   }
+
+  s_iwdg_refresh_fail_count = 0U;
 }
 
 /**
@@ -395,7 +288,7 @@ static void MX_IWDG1_Init(void)
 
   if (HAL_IWDG_Init(&hiwdg1) != HAL_OK)
   {
-    SEGGER_RTT_WriteString(0, "✗ Watchdog init failed\r\n");
+    SEGGER_RTT_WriteString(0, "[ERR] Watchdog init failed\r\n");
     Error_Handler();
   }
 }
@@ -538,9 +431,7 @@ void MPU_Config(void)
 void Error_Handler(void)
 {
   SEGGER_RTT_WriteString(0, "\r\n");
-  SEGGER_RTT_WriteString(0, "╔════════════════════════════════════════════╗\r\n");
-  SEGGER_RTT_WriteString(0, "║          ERROR_HANDLER TRIGGERED!          ║\r\n");
-  SEGGER_RTT_WriteString(0, "╚════════════════════════════════════════════╝\r\n");
+  SEGGER_RTT_WriteString(0, "[ERR] ERROR_HANDLER TRIGGERED!\r\n");
   SEGGER_RTT_WriteString(0, "System will be reset by watchdog...\r\n");
 
   app_log_record(APP_LOG_EVENT_ERROR_HANDLER, 0U, 0U, 0U);

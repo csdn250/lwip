@@ -91,19 +91,3 @@ void dac_tpc112s4_write_all(uint16_t ch1,
 
     dac_tpc112s4_load_update();
 }
-
-void dac_tpc112s4_test_pattern(void)
-{
-    dac_tpc112s4_write_frame(dac_tpc112s4_make_frame(DAC_TPC112S4_CH_A,
-                                                     0x000U));
-
-    dac_tpc112s4_write_frame(dac_tpc112s4_make_frame(DAC_TPC112S4_CH_B,
-                                                     0x555U));
-
-    dac_tpc112s4_write_frame(dac_tpc112s4_make_frame(DAC_TPC112S4_CH_C,
-                                                     0xAAAU));
-
-    dac_tpc112s4_write_frame(dac_tpc112s4_make_frame(DAC_TPC112S4_CH_D,
-                                                     0xFFFU));
-    dac_tpc112s4_load_update();
-}
