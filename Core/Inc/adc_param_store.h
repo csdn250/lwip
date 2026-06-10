@@ -26,6 +26,7 @@
 
 #define ADC_PARAM_BLOCK_LOG_SNAPSHOT 0x000DU
 #define ADC_PARAM_BLOCK_DAC_STATUS 0x000EU
+#define ADC_PARAM_BLOCK_DEVICE_NAME 0x000FU
 
 typedef struct
 {
@@ -57,6 +58,14 @@ uint8_t adc_param_store_apply_dac_param(uint16_t block_id,
 uint8_t adc_param_store_apply_network_param(uint16_t block_id,
                                             const uint8_t *data,
                                             uint16_t len);
+
+/*
+ * Apply DEVICE_NAME block: copy raw bytes into device_config network name
+ * (truncated to DEVICE_CONFIG_NAME_MAX_LEN-1 chars, NUL-terminated) and
+ * request a deferred EEPROM save.
+ */
+uint8_t adc_param_store_apply_name_param(const uint8_t *data,
+                                         uint16_t len);
 
 uint8_t adc_param_store_is_network_dirty(void);
 

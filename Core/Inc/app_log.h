@@ -51,6 +51,10 @@ typedef enum
     APP_LOG_EVENT_IWDG_REFRESH_FAILED,        // 看门狗刷新失败
     APP_LOG_EVENT_NETIF_FAILED,               // 网络配置应用失败
     APP_LOG_EVENT_ERROR_HANDLER,              // 错误处理函数被调用
+
+    APP_LOG_EVENT_CONFIG_SAVED,               // 延迟保存：配置已写入 EEPROM
+    APP_LOG_EVENT_CONFIG_SAVE_FAILED,         // 延迟保存：写入 EEPROM 失败
+    APP_LOG_EVENT_TCP_IDLE_TIMEOUT,           // TCP 空闲超时，主动中止连接
 } app_log_event_t;
 
 #define APP_LOG_RECORD_CAPACITY 64U

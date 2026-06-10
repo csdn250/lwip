@@ -1,5 +1,6 @@
 #include "device_config.h"
 #include "eeprom_storage.h"
+#include "app_log.h"
 
 #include <string.h>
 
@@ -21,6 +22,13 @@ typedef struct
 static device_network_config_t s_network_config;
 static device_adc_cal_config_t s_adc_cal_config;
 static device_dac_config_t s_dac_config;
+
+/*
+ * 延迟保存脏标记：1 = 有配置改动待写入 EEPROM。
+ * 由 device_config_request_save() 置位（参数应用路径调用，非阻塞），
+ * 由 device_config_process_save() 在主循环空闲点清位并完成实际写入。
+ */
+static uint8_t s_config_save_pending;
 
 static uint32_t device_config_crc32(const uint8_t *data, uint16_t len);
 
@@ -152,6 +160,65 @@ HAL_StatusTypeDef device_config_save_all(void)
 HAL_StatusTypeDef device_config_save_network(void)
 {
     return device_config_save_all();
+}
+
+/**
+ * @brief 请求延迟保存配置
+ * @details 仅置脏标记，立即返回，不触发任何阻塞式 EEPROM 写。
+ *          真正的写由主循环 device_config_process_save() 完成。
+ * @retval None
+ *
+ * @note 参数应用路径（cal/dac/network/name）应调用本函数，避免在
+ *       lwIP recv 回调里同步写 EEPROM 而阻塞协议栈与看门狗喂狗。
+ */
+void device_config_request_save(void)
+{
+    s_config_save_pending = 1U;
+}
+
+/**
+ * @brief 查询是否有待保存的配置改动
+ * @retval uint8_t 1 = 有待保存改动，0 = 无
+ */
+uint8_t device_config_is_save_pending(void)
+{
+    return s_config_save_pending;
+}
+
+/**
+ * @brief 处理延迟保存（在主循环空闲点调用）
+ * @details 若存在待保存改动，则执行一次合并后的完整记录写入。
+ *          无论成功失败都会清除脏标记，避免反复重试持续阻塞主循环。
+ * @retval None
+ *
+ * @note 此处仍是阻塞式 I2C 写，但已从 lwIP 回调上下文挪到主循环安全点，
+ *       且多次连续改动会合并为一次写入。
+ */
+void device_config_process_save(void)
+{
+    HAL_StatusTypeDef status;
+
+    if (0U == s_config_save_pending)
+    {
+        return;
+    }
+
+    /* 先清标记：即使本次写失败也不在主循环里反复阻塞重试 */
+    s_config_save_pending = 0U;
+
+    status = device_config_save_all();
+
+    if (HAL_OK == status)
+    {
+        app_log_record(APP_LOG_EVENT_CONFIG_SAVED, 0U, 0U, 0U);
+    }
+    else
+    {
+        app_log_record(APP_LOG_EVENT_CONFIG_SAVE_FAILED,
+                       (uint16_t)status,
+                       0U,
+                       0U);
+    }
 }
 
 static uint32_t device_config_crc32(const uint8_t *data, uint16_t len)

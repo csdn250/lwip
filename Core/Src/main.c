@@ -52,7 +52,6 @@ static uint32_t s_watchdog_disabled_last_log_tick = 0U;
 static void App_LogResetCause(void);
 static void App_RefreshWatchdog(void);
 
-
 /* ================== PUBLIC MAIN FUNCTION ================== */
 
 /**
@@ -159,9 +158,14 @@ int main(void)
 
     udp_discovery_process();
 
+    /*
+     * 参数写入命令只修改 RAM 镜像并置保存标记；
+     * 真正的 EEPROM 写入放在主循环空闲点执行，避免阻塞 TCP 回调。
+     */
+    device_config_process_save();
+
     App_RefreshWatchdog();
   }
-
 }
 
 /* ================== PRIVATE FUNCTIONS ================== */

@@ -103,6 +103,13 @@ static uint8_t s_param_da_ch3[DAC_PARAM_BYTES];
  */
 static uint8_t s_param_da_ch4[DAC_PARAM_BYTES];
 
+/**
+ * @brief 设备名参数缓冲区
+ * @details 存储设备名（与 device_config 中的 name 字段同步）。
+ *          UDP 广播也会发送此名，上位机可通过 0x000F block 读写。
+ */
+static uint8_t s_param_name[DEVICE_CONFIG_NAME_MAX_LEN];
+
 /* ==================== Parameter Table ==================== */
 
 /**
@@ -157,6 +164,10 @@ static adc_param_block_t s_param_table[] =
 
         {ADC_PARAM_BLOCK_DA_CH4, s_param_da_ch4,
          sizeof(s_param_da_ch4), sizeof(s_param_da_ch4)},
+
+        // 设备名块（与 device_config.name 同步，可读可写）
+        {ADC_PARAM_BLOCK_DEVICE_NAME, s_param_name,
+         sizeof(s_param_name), sizeof(s_param_name)},
 };
 
 /* ==================== Network Configuration Dirty Flag ==================== */
@@ -285,6 +296,9 @@ void adc_param_store_sync_from_config(void)
     memcpy(s_param_netmask, net_cfg->netmask, sizeof(net_cfg->netmask));
     memcpy(s_param_gateway, net_cfg->gateway, sizeof(net_cfg->gateway));
 
+    // 同步设备名（读路径：READ_PARAM 0x000F 返回当前名，全长 32 字节）
+    memcpy(s_param_name, net_cfg->name, DEVICE_CONFIG_NAME_MAX_LEN);
+
     // ③ 同步 ADC 校准参数
     index = 0U;
     for (ch = 0U; ch < DEVICE_CONFIG_ADC_CHANNEL_COUNT; ch++)
@@ -369,6 +383,14 @@ uint8_t adc_param_store_check_write_len(uint16_t block_id,
     else if (ADC_PARAM_BLOCK_GATEWAY == block_id)
     {
         return (sizeof(s_param_gateway) == len)
+                   ? ADC_PROTO_WRITE_STATUS_OK
+                   : ADC_PROTO_WRITE_STATUS_BAD_LEN;
+    }
+
+    // ④ 设备名：允许变长，1..DEVICE_CONFIG_NAME_MAX_LEN 字节
+    if (ADC_PARAM_BLOCK_DEVICE_NAME == block_id)
+    {
+        return ((len >= 1U) && (len <= DEVICE_CONFIG_NAME_MAX_LEN))
                    ? ADC_PROTO_WRITE_STATUS_OK
                    : ADC_PROTO_WRITE_STATUS_BAD_LEN;
     }
@@ -466,15 +488,10 @@ uint8_t adc_param_store_apply_network_param(uint16_t block_id,
 
     // ③ 更新配置并设置脏标记
     device_config_set_network(&net_cfg);
-    s_network_config_dirty = 1U;  // ← 标记网络参数已修改
+    s_network_config_dirty = 1U;  // ← 标记网络参数已修改（驱动 netif 重配）
 
-    // ④ 尝试保存到 EEPROM
-    if (HAL_OK == device_config_save_network())
-    {
-        SEGGER_RTT_WriteString(0, "net param saved\r\n");
-        SEGGER_RTT_WriteString(0, "net param applied\r\n");
-        return ADC_PROTO_WRITE_STATUS_OK;
-    }
+    // ④ 请求延迟保存到 EEPROM（实际写入在主循环空闲点完成，不在此阻塞）
+    device_config_request_save();
 
     SEGGER_RTT_WriteString(0, "net param save pending\r\n");
     SEGGER_RTT_WriteString(0, "net param applied\r\n");
@@ -502,6 +519,60 @@ uint8_t adc_param_store_is_network_dirty(void)
 void adc_param_store_clear_network_dirty(void)
 {
     s_network_config_dirty = 0U;
+}
+
+/* ==================== Device Name Application ==================== */
+
+/**
+ * @brief 应用设备名参数
+ * @details 将新的设备名写入 device_config 并请求延迟保存到 EEPROM
+ *
+ * @param[in] data: 设备名原始字节（不要求以 '\0' 结尾）
+ * @param[in] len:  字节数（1..DEVICE_CONFIG_NAME_MAX_LEN）
+ * @retval uint8_t
+ *         ADC_PROTO_WRITE_STATUS_SAVE_PENDING = 应用成功，保存待处理
+ *         ADC_PROTO_WRITE_STATUS_BAD_LEN      = 参数非法
+ *
+ * @note 名字最长保留 DEVICE_CONFIG_NAME_MAX_LEN-1 个字符，强制末尾 '\0'，
+ *       避免上位机未带终止符导致 UDP 广播 / 后续读取越界。
+ */
+uint8_t adc_param_store_apply_name_param(const uint8_t *data,
+                                         uint16_t len)
+{
+    device_network_config_t net_cfg;
+    uint16_t copy_len;
+
+    // ① 验证输入
+    if ((NULL == data) || (0U == len) || (len > DEVICE_CONFIG_NAME_MAX_LEN))
+    {
+        return ADC_PROTO_WRITE_STATUS_BAD_LEN;
+    }
+
+    // ② 复制当前网络配置
+    memcpy(&net_cfg,
+           device_config_get_network(),
+           sizeof(net_cfg));
+
+    // ③ 截断到可用空间并强制 NUL 结尾
+    copy_len = len;
+    if (copy_len > (DEVICE_CONFIG_NAME_MAX_LEN - 1U))
+    {
+        copy_len = (uint16_t)(DEVICE_CONFIG_NAME_MAX_LEN - 1U);
+    }
+
+    memset(net_cfg.name, 0, sizeof(net_cfg.name));
+    memcpy(net_cfg.name, data, copy_len);
+    // net_cfg.name 已 memset 清零，第 copy_len 字节即为 '\0'
+
+    // ④ 更新 device_config 并同步参数表
+    device_config_set_network(&net_cfg);
+    adc_param_store_sync_from_config();
+
+    // ⑤ 请求延迟保存（实际写入在主循环空闲点完成）
+    device_config_request_save();
+
+    SEGGER_RTT_WriteString(0, "name param save pending\r\n");
+    return ADC_PROTO_WRITE_STATUS_SAVE_PENDING;
 }
 
 /* ==================== ADC Calibration Parameter Application ==================== */
@@ -549,12 +620,8 @@ uint8_t adc_param_store_apply_cal_param(const uint8_t *data,
     // ④ 同步参数表
     adc_param_store_sync_from_config();
 
-    // ⑤ 保存到 EEPROM
-    if (HAL_OK == device_config_save_all())
-    {
-        SEGGER_RTT_WriteString(0, "cal param saved\r\n");
-        return ADC_PROTO_WRITE_STATUS_OK;
-    }
+    // ⑤ 请求延迟保存到 EEPROM（实际写入在主循环空闲点完成）
+    device_config_request_save();
 
     SEGGER_RTT_WriteString(0, "cal param save pending\r\n");
     return ADC_PROTO_WRITE_STATUS_SAVE_PENDING;
@@ -646,12 +713,8 @@ uint8_t adc_param_store_apply_dac_param(uint16_t block_id,
 
     SEGGER_RTT_WriteString(0, "dac param applied\r\n");
 
-    // ⑨ 保存到 EEPROM
-    if (HAL_OK == device_config_save_all())
-    {
-        SEGGER_RTT_WriteString(0, "dac param saved\r\n");
-        return ADC_PROTO_WRITE_STATUS_OK;
-    }
+    // ⑨ 请求延迟保存到 EEPROM（实际写入在主循环空闲点完成）
+    device_config_request_save();
 
     SEGGER_RTT_WriteString(0, "dac param save pending\r\n");
     return ADC_PROTO_WRITE_STATUS_SAVE_PENDING;

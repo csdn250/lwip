@@ -175,6 +175,12 @@ LWIP_MEMPOOL_DECLARE(RX_POOL, ETH_RX_BUFFER_CNT, sizeof(RxBuff_t), "Zero-copy RX
 /* Variable Definitions */
 static uint8_t RxAllocStatus;
 
+#if defined ( __CC_ARM )
+__align(4) static uint8_t s_eth_mac_addr[6];
+#else
+static uint8_t s_eth_mac_addr[6] __attribute__((aligned(4)));
+#endif
+
 #if defined ( __ICCARM__ ) /*!< IAR Compiler */
 
 #pragma location=0x30000000
@@ -246,15 +252,14 @@ static void low_level_init(struct netif *netif)
 
   /* Start ETH HAL Init */
 
-   uint8_t MACAddr[6] ;
   heth.Instance = ETH;
-  MACAddr[0] = net_cfg->mac[0];
-  MACAddr[1] = net_cfg->mac[1];
-  MACAddr[2] = net_cfg->mac[2];
-  MACAddr[3] = net_cfg->mac[3];
-  MACAddr[4] = net_cfg->mac[4];
-  MACAddr[5] = net_cfg->mac[5];
-  heth.Init.MACAddr = &MACAddr[0];
+  s_eth_mac_addr[0] = net_cfg->mac[0];
+  s_eth_mac_addr[1] = net_cfg->mac[1];
+  s_eth_mac_addr[2] = net_cfg->mac[2];
+  s_eth_mac_addr[3] = net_cfg->mac[3];
+  s_eth_mac_addr[4] = net_cfg->mac[4];
+  s_eth_mac_addr[5] = net_cfg->mac[5];
+  heth.Init.MACAddr = s_eth_mac_addr;
   heth.Init.MediaInterface = HAL_ETH_RMII_MODE;
   heth.Init.TxDesc = DMATxDscrTab;
   heth.Init.RxDesc = DMARxDscrTab;

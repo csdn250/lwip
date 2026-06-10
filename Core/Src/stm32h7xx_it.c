@@ -22,6 +22,7 @@
 #include "stm32h7xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "SEGGER_RTT.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -83,16 +84,52 @@ void NMI_Handler(void)
 /**
   * @brief This function handles Hard fault interrupt.
   */
-void HardFault_Handler(void)
+void HardFault_Handler_C(uint32_t *stack)
 {
-  /* USER CODE BEGIN HardFault_IRQn 0 */
+  uint32_t stacked_r0 = stack[0];
+  uint32_t stacked_r1 = stack[1];
+  uint32_t stacked_r2 = stack[2];
+  uint32_t stacked_r3 = stack[3];
+  uint32_t stacked_r12 = stack[4];
+  uint32_t stacked_lr = stack[5];
+  uint32_t stacked_pc = stack[6];
+  uint32_t stacked_psr = stack[7];
 
-  /* USER CODE END HardFault_IRQn 0 */
+  SEGGER_RTT_printf(0,
+                    "HardFault CFSR=0x%08X HFSR=0x%08X BFAR=0x%08X MMFAR=0x%08X\r\n",
+                    (unsigned int)SCB->CFSR,
+                    (unsigned int)SCB->HFSR,
+                    (unsigned int)SCB->BFAR,
+                    (unsigned int)SCB->MMFAR);
+
+  SEGGER_RTT_printf(0,
+                    "Stacked PC=0x%08X LR=0x%08X PSR=0x%08X\r\n",
+                    (unsigned int)stacked_pc,
+                    (unsigned int)stacked_lr,
+                    (unsigned int)stacked_psr);
+
+  SEGGER_RTT_printf(0,
+                    "Stacked R0=0x%08X R1=0x%08X R2=0x%08X R3=0x%08X R12=0x%08X\r\n",
+                    (unsigned int)stacked_r0,
+                    (unsigned int)stacked_r1,
+                    (unsigned int)stacked_r2,
+                    (unsigned int)stacked_r3,
+                    (unsigned int)stacked_r12);
+
   while (1)
   {
-    /* USER CODE BEGIN W1_HardFault_IRQn 0 */
-    /* USER CODE END W1_HardFault_IRQn 0 */
   }
+}
+
+__asm void HardFault_Handler(void)
+{
+  IMPORT HardFault_Handler_C
+
+  TST LR, #4
+  ITE EQ
+  MRSEQ R0, MSP
+  MRSNE R0, PSP
+  B HardFault_Handler_C
 }
 
 /**

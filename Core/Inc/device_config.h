@@ -66,6 +66,21 @@ HAL_StatusTypeDef device_config_load_network(void);
 HAL_StatusTypeDef device_config_save_all(void);
 HAL_StatusTypeDef device_config_load_all(void);
 
+/*
+ * 延迟保存机制
+ * ------------
+ * device_config_save_all() 内部是阻塞式 I2C 写（每页都要等 EEPROM ready，
+ * 最坏跨多页时阻塞数百毫秒）。若在 lwIP recv 回调里直接调用，会阻塞
+ * MX_LWIP_Process() 并影响看门狗喂狗。
+ *
+ * 因此参数应用路径只调用 device_config_request_save() 置脏标记，真正的
+ * EEPROM 写由主循环空闲点调用 device_config_process_save() 完成（安全点，
+ * 不在任何 lwIP 回调上下文中）。
+ */
+void device_config_request_save(void);
+uint8_t device_config_is_save_pending(void);
+void device_config_process_save(void);
+
 const device_adc_cal_config_t *device_config_get_adc_calibration(void);
 
 void device_config_set_adc_calibration(const device_adc_cal_config_t *config);
