@@ -3,6 +3,8 @@
 
 #include "main.h"
 
+#include <stdint.h>
+
 #define ADC_PROTO_WRITE_STATUS_OK 0x00U
 #define ADC_PROTO_WRITE_STATUS_SAVE_PENDING 0x01U
 #define ADC_PROTO_WRITE_STATUS_BAD_LEN 0x02U

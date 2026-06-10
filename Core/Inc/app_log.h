@@ -39,6 +39,18 @@ typedef enum
     APP_LOG_EVENT_LOG_CLEARED,
     APP_LOG_EVENT_RESET_CAUSE,
     APP_LOG_EVENT_WATCHDOG_TEST,
+
+    // ====== 新增事件（来自优化的 main.c） ======
+    APP_LOG_EVENT_CONFIG_LOADED,              // 从 EEPROM 成功加载配置
+    APP_LOG_EVENT_CONFIG_DEFAULT,             // 使用默认配置
+    APP_LOG_EVENT_ADC_INIT_FAILED,            // ADC 初始化失败
+    APP_LOG_EVENT_ADC_START_FAILED,           // ADC 启动失败
+    APP_LOG_EVENT_SYSTEM_READY,               // 系统启动完成
+    APP_LOG_EVENT_TCP_STREAM_STOPPED,         // TCP 数据流停止
+    APP_LOG_EVENT_TCP_STREAM_STARTED,         // TCP 数据流启动
+    APP_LOG_EVENT_IWDG_REFRESH_FAILED,        // 看门狗刷新失败
+    APP_LOG_EVENT_NETIF_FAILED,               // 网络配置应用失败
+    APP_LOG_EVENT_ERROR_HANDLER,              // 错误处理函数被调用
 } app_log_event_t;
 
 #define APP_LOG_RECORD_CAPACITY 64U
@@ -51,8 +63,6 @@ typedef struct
     uint32_t arg1;
     uint32_t arg2;
 } app_log_record_t;
-
-
 
 void app_log_init(void);
 void app_log_key_event(app_log_event_t event,
