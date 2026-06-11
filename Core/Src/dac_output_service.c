@@ -9,15 +9,20 @@
 static device_dac_config_t s_last_config;
 static uint16_t s_current_code[DEVICE_CONFIG_DAC_CHANNEL_COUNT];
 
-static uint8_t dac_output_service_config_changed(const device_dac_config_t *config);
+static uint8_t dac_output_service_config_changed(const device_dac_config_t
+                                                     *dac_config);
 static uint16_t dac_output_service_limit_code(int32_t value);
-static uint16_t dac_output_service_manual_to_code(const device_dac_channel_config_t *config);
+static uint16_t dac_output_service_manual_to_code(const device_dac_channel_config_t
+                                                      *dac_ch_config);
 static uint16_t dac_output_service_cascade_to_code(uint16_t adc_raw,
-                                                   const device_adc_cal_channel_t *adc_cal,
-                                                   const device_dac_channel_config_t *dac_config);
+                                                   const device_adc_cal_channel_t
+                                                       *adc_cal,
+                                                   const device_dac_channel_config_t
+                                                       *dac_config);
 
 static int32_t dac_output_service_round_float_to_i32(float value);
-static uint8_t dac_output_service_has_adc_cascade(const device_dac_config_t *config);
+static uint8_t dac_output_service_has_adc_cascade(const device_dac_config_t
+                                                      *dac_config);
 
 void dac_output_service_init(void)
 {
@@ -27,39 +32,39 @@ void dac_output_service_init(void)
 
 void dac_output_service_process(void)
 {
-    const device_dac_config_t *config;
+    const device_dac_config_t *dac_config;
     uint8_t ch;
     uint16_t code;
 
-    config = device_config_get_dac_config();
+    dac_config = device_config_get_dac_config();
 
-    if (0U == dac_output_service_config_changed(config))
+    if (0U == dac_output_service_config_changed(dac_config))
     {
         return;
     }
 
     for (ch = 0U; ch < DEVICE_CONFIG_DAC_CHANNEL_COUNT; ch++)
     {
-        if (DEVICE_CONFIG_DAC_MODE_MANUAL == config->ch[ch].mode)
+        if (DEVICE_CONFIG_DAC_MODE_MANUAL == dac_config->ch[ch].mode)
         {
-            code = dac_output_service_manual_to_code(&config->ch[ch]);
+            code = dac_output_service_manual_to_code(&dac_config->ch[ch]);
             s_current_code[ch] = code;
             dac_tpc112s4_write_channel(ch, code);
         }
     }
 
-    memcpy(&s_last_config, config, sizeof(s_last_config));
+    memcpy(&s_last_config, dac_config, sizeof(s_last_config));
 }
 
 void dac_output_service_process_adc_cascade(void)
 {
-    const device_dac_config_t *config;
+    const device_dac_config_t *dac_config;
     adc_acq_sample_t sample;
     uint8_t count;
 
-    config = device_config_get_dac_config();
+    dac_config = device_config_get_dac_config();
 
-    if (0U == dac_output_service_has_adc_cascade(config))
+    if (0U == dac_output_service_has_adc_cascade(dac_config))
     {
         return;
     }
@@ -146,30 +151,30 @@ void dac_output_service_get_current_codes(uint16_t *codes,
     }
 }
 
-static uint8_t dac_output_service_config_changed(const device_dac_config_t *config)
+static uint8_t dac_output_service_config_changed(const device_dac_config_t *dac_config)
 {
-    if (NULL == config)
+    if (NULL == dac_config)
     {
         return 0U;
     }
 
-    return (0 == memcmp(&s_last_config, config, sizeof(s_last_config))
+    return (0 == memcmp(&s_last_config, dac_config, sizeof(s_last_config))
                 ? 0U
                 : 1U);
 }
 
-static uint8_t dac_output_service_has_adc_cascade(const device_dac_config_t *config)
+static uint8_t dac_output_service_has_adc_cascade(const device_dac_config_t *dac_config)
 {
     uint8_t ch;
 
-    if (NULL == config)
+    if (NULL == dac_config)
     {
         return 0U;
     }
 
     for (ch = 0U; ch < DEVICE_CONFIG_DAC_CHANNEL_COUNT; ch++)
     {
-        if (DEVICE_CONFIG_DAC_MODE_ADC_CASCADE == config->ch[ch].mode)
+        if (DEVICE_CONFIG_DAC_MODE_ADC_CASCADE == dac_config->ch[ch].mode)
         {
             return 1U;
         }
@@ -193,19 +198,18 @@ static uint16_t dac_output_service_limit_code(int32_t value)
     return (uint16_t)value;
 }
 
-static uint16_t dac_output_service_manual_to_code(const device_dac_channel_config_t *config)
+static uint16_t dac_output_service_manual_to_code(const device_dac_channel_config_t
+                                                      *dac_ch_config)
 {
     float dac_value;
     int32_t code;
 
-    if (NULL == config)
+    if (NULL == dac_ch_config)
     {
         return 0U;
     }
 
-    dac_value = (config->manual_voltage *
-                 ((float)config->k_raw * DEVICE_CONFIG_DAC_CAL_K_SCALE)) +
-                (float)config->b_raw;
+    dac_value = (dac_ch_config->manual_voltage * dac_ch_config->k) + dac_ch_config->b;
 
     code = dac_output_service_round_float_to_i32(dac_value);
 
@@ -213,20 +217,18 @@ static uint16_t dac_output_service_manual_to_code(const device_dac_channel_confi
 }
 
 static uint16_t dac_output_service_cascade_to_code(uint16_t adc_raw,
-                                                   const device_adc_cal_channel_t *adc_cal,
-                                                   const device_dac_channel_config_t *dac_config)
+                                                   const device_adc_cal_channel_t
+                                                       *adc_cal,
+                                                   const device_dac_channel_config_t
+                                                       *dac_config)
 {
     float adc_value;
     float dac_value;
     int32_t code;
 
-    adc_value = ((float)adc_raw *
-                 ((float)adc_cal->k_raw * DEVICE_CONFIG_ADC_CAL_K_SCALE)) +
-                ((float)adc_cal->b_raw * DEVICE_CONFIG_ADC_CAL_B_SCALE);
+    adc_value = ((float)adc_raw * adc_cal->k) + adc_cal->b;
 
-    dac_value = (adc_value *
-                 ((float)dac_config->k_raw * DEVICE_CONFIG_DAC_CAL_K_SCALE)) +
-                (float)dac_config->b_raw;
+    dac_value = (adc_value * dac_config->k) + dac_config->b;
 
     code = dac_output_service_round_float_to_i32(dac_value);
 

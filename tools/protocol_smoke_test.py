@@ -37,7 +37,8 @@ FIXED_BLOCK_ID_SIZE = 2
 FIXED_DATA_CAPACITY = FIXED_CRC_OFFSET - FIXED_DATA_OFFSET - FIXED_BLOCK_ID_SIZE
 
 DEFAULT_DA1_VOLTAGE = 2.5
-DEFAULT_DAC_K_RAW = 8_190_000
+DEFAULT_DAC_K = 819.0
+DEFAULT_DAC_B = 0.0
 DEFAULT_EXPECTED_DA1_CODE = 2048
 
 
@@ -113,10 +114,10 @@ def expect_reply(actual_cmd: int, actual_block: int, expected_cmd: int, expected
         )
 
 
-def make_da_manual_data(voltage: float, k_raw: int, b_raw: int) -> bytes:
+def make_da_manual_data(voltage: float, k: float, b: float) -> bytes:
     mode_manual = 0
     adc_channel_unused = 0xFF
-    return struct.pack(">BfBii", mode_manual, voltage, adc_channel_unused, k_raw, b_raw)
+    return struct.pack(">BfBff", mode_manual, voltage, adc_channel_unused, k, b)
 
 
 def run_smoke_test(host: str, port: int, bind: str | None) -> None:
@@ -142,7 +143,7 @@ def run_smoke_test(host: str, port: int, bind: str | None) -> None:
             raise AssertionError(f"MAC block length mismatch: {len(data)}")
         print(f"ok read MAC: {data.hex(':')}")
 
-        da_data = make_da_manual_data(DEFAULT_DA1_VOLTAGE, DEFAULT_DAC_K_RAW, 0)
+        da_data = make_da_manual_data(DEFAULT_DA1_VOLTAGE, DEFAULT_DAC_K, DEFAULT_DAC_B)
         cmd, block, data = request(sock, CMD_WRITE_PARAM, BLOCK_DA1, da_data)
         expect_reply(cmd, block, CMD_WRITE_PARAM, BLOCK_DA1)
         if data not in (bytes([WRITE_STATUS_OK]), bytes([WRITE_STATUS_SAVE_PENDING])):

@@ -6,7 +6,7 @@
 
 #define DEVICE_CONFIG_EEPROM_ADDR 0x0000U
 #define DEVICE_CONFIG_MAGIC 0x41444346UL
-#define DEVICE_CONFIG_VERSION 3U
+#define DEVICE_CONFIG_VERSION 4U
 
 typedef struct
 {
@@ -23,6 +23,20 @@ static device_network_config_t s_network_config;
 static device_adc_cal_config_t s_adc_cal_config;
 static device_dac_config_t s_dac_config;
 
+static const device_network_config_t s_default_network_config =
+    {
+        {0x02U, 0x00U, 0x00U, 0x00U, 0x00U, 0x21U},
+        {192U, 168U, 1U, 21U},
+        {255U, 255U, 255U, 0U},
+        {192U, 168U, 1U, 1U},
+        8080U,
+        "ADDA_COLLECT_1"};
+
+static const float s_default_adc_k = 0.0001f;
+static const float s_default_adc_b = 0.001f;
+static const float s_default_dac_k = 819.0f;
+static const float s_default_dac_b = 0.0f;
+
 /*
  * 延迟保存脏标记：1 = 有配置改动待写入 EEPROM。
  * 由 device_config_request_save() 置位（参数应用路径调用，非阻塞），
@@ -36,40 +50,17 @@ void device_config_init_defaults(void)
 {
     uint8_t ch;
 
-    memset(&s_network_config, 0, sizeof(s_network_config));
+    memcpy(&s_network_config,
+           &s_default_network_config,
+           sizeof(s_network_config));
+
     memset(&s_adc_cal_config, 0, sizeof(s_adc_cal_config));
     memset(&s_dac_config, 0, sizeof(s_dac_config));
 
-    s_network_config.mac[0] = 0x02U;
-    s_network_config.mac[1] = 0x00U;
-    s_network_config.mac[2] = 0x00U;
-    s_network_config.mac[3] = 0x00U;
-    s_network_config.mac[4] = 0x00U;
-    s_network_config.mac[5] = 0x21U;
-
-    s_network_config.ip[0] = 192U;
-    s_network_config.ip[1] = 168U;
-    s_network_config.ip[2] = 1U;
-    s_network_config.ip[3] = 21U;
-
-    s_network_config.netmask[0] = 255U;
-    s_network_config.netmask[1] = 255U;
-    s_network_config.netmask[2] = 255U;
-    s_network_config.netmask[3] = 0U;
-
-    s_network_config.gateway[0] = 192U;
-    s_network_config.gateway[1] = 168U;
-    s_network_config.gateway[2] = 1U;
-    s_network_config.gateway[3] = 1U;
-
-    s_network_config.tcp_port = 8080U;
-
-    memcpy(s_network_config.name, "ADDA_COLLECT_1", 14U);
-
     for (ch = 0U; ch < DEVICE_CONFIG_ADC_CHANNEL_COUNT; ch++)
     {
-        s_adc_cal_config.ch[ch].k_raw = DEVICE_CONFIG_ADC_CAL_DEFAULT_K_RAW;
-        s_adc_cal_config.ch[ch].b_raw = DEVICE_CONFIG_ADC_CAL_DEFAULT_B_RAW;
+        s_adc_cal_config.ch[ch].k = s_default_adc_k;
+        s_adc_cal_config.ch[ch].b = s_default_adc_b;
     }
 
     for (ch = 0U; ch < DEVICE_CONFIG_DAC_CHANNEL_COUNT; ch++)
@@ -77,8 +68,8 @@ void device_config_init_defaults(void)
         s_dac_config.ch[ch].mode = DEVICE_CONFIG_DAC_MODE_MANUAL;
         s_dac_config.ch[ch].manual_voltage = 0.0f;
         s_dac_config.ch[ch].adc_channel = DEVICE_CONFIG_DAC_ADC_CH_INVALID;
-        s_dac_config.ch[ch].k_raw = DEVICE_CONFIG_DAC_CAL_DEFAULT_K_RAW;
-        s_dac_config.ch[ch].b_raw = DEVICE_CONFIG_DAC_CAL_DEFAULT_B_RAW;
+        s_dac_config.ch[ch].k = s_default_dac_k;
+        s_dac_config.ch[ch].b = s_default_dac_b;
     }
 }
 
@@ -87,14 +78,14 @@ const device_network_config_t *device_config_get_network(void)
     return &s_network_config;
 }
 
-void device_config_set_network(const device_network_config_t *config)
+void device_config_set_network(const device_network_config_t *network_config)
 {
-    if (NULL == config)
+    if (NULL == network_config)
     {
         return;
     }
 
-    memcpy(&s_network_config, config, sizeof(s_network_config));
+    memcpy(&s_network_config, network_config, sizeof(s_network_config));
 }
 
 const device_adc_cal_config_t *device_config_get_adc_calibration(void)
@@ -102,14 +93,14 @@ const device_adc_cal_config_t *device_config_get_adc_calibration(void)
     return &s_adc_cal_config;
 }
 
-void device_config_set_adc_calibration(const device_adc_cal_config_t *config)
+void device_config_set_adc_calibration(const device_adc_cal_config_t *adc_cal_config)
 {
-    if (NULL == config)
+    if (NULL == adc_cal_config)
     {
         return;
     }
 
-    memcpy(&s_adc_cal_config, config, sizeof(s_adc_cal_config));
+    memcpy(&s_adc_cal_config, adc_cal_config, sizeof(s_adc_cal_config));
 }
 
 const device_dac_config_t *device_config_get_dac_config(void)
@@ -117,14 +108,14 @@ const device_dac_config_t *device_config_get_dac_config(void)
     return &s_dac_config;
 }
 
-void device_config_set_dac_config(const device_dac_config_t *config)
+void device_config_set_dac_config(const device_dac_config_t *dac_config)
 {
-    if (NULL == config)
+    if (NULL == dac_config)
     {
         return;
     }
 
-    memcpy(&s_dac_config, config, sizeof(s_dac_config));
+    memcpy(&s_dac_config, dac_config, sizeof(s_dac_config));
 }
 
 HAL_StatusTypeDef device_config_save_all(void)
@@ -155,11 +146,6 @@ HAL_StatusTypeDef device_config_save_all(void)
     return eeprom_storage_write(DEVICE_CONFIG_EEPROM_ADDR,
                                 (const uint8_t *)&record,
                                 sizeof(record));
-}
-
-HAL_StatusTypeDef device_config_save_network(void)
-{
-    return device_config_save_all();
 }
 
 /**
@@ -295,9 +281,4 @@ HAL_StatusTypeDef device_config_load_all(void)
     memcpy(&s_dac_config, &record.dac, sizeof(s_dac_config));
 
     return HAL_OK;
-}
-
-HAL_StatusTypeDef device_config_load_network(void)
-{
-    return device_config_load_all();
 }

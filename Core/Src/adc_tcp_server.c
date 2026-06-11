@@ -27,12 +27,11 @@
 /** @brief 获取数组元素个数 */
 #define ADC_ARRAY_SIZE(array) (sizeof(array) / sizeof((array)[0]))
 
-/** @brief ADC 校准参数字节数 = 12 通道 × 2 (k_raw + b_raw) × 4 字节 */
-#define ADC_CAL_PARAM_BYTES (DEVICE_CONFIG_ADC_CHANNEL_COUNT * 2U * sizeof(int32_t))
-
 /** @brief ADC 数据流发送控制参数 */
-#define ADC_STREAM_MAX_FRAMES_PER_PUMP 32U // 每次循环最多发送 32 帧
-#define ADC_STREAM_TCP_SEND_MARGIN 32U     // TCP 发送缓冲区预留边际（字节）
+// 每次循环最多发送 32 帧
+#define ADC_STREAM_MAX_FRAMES_PER_PUMP 32U
+// TCP 发送缓冲区预留边际（字节）
+#define ADC_STREAM_TCP_SEND_MARGIN ADC_PROTO_COMMAND_FRAME_SIZE
 
 /** @brief DAC 参数字节数 */
 #define DAC_PARAM_BYTES 14U
@@ -152,6 +151,9 @@ static err_t adc_tcp_server_recv(void *arg,
                                  struct tcp_pcb *tpcb,
                                  struct pbuf *p,
                                  err_t err);
+static err_t adc_tcp_server_sent(void *arg,
+                                 struct tcp_pcb *tpcb,
+                                 u16_t len);
 static err_t adc_tcp_server_poll(void *arg, struct tcp_pcb *tpcb);
 static void adc_tcp_server_error(void *arg, err_t err);
 static void adc_tcp_server_close_client(struct tcp_pcb *tpcb);
@@ -185,15 +187,15 @@ static void adc_tcp_server_start_stream(uint8_t stream_type);
 static void adc_tcp_server_disable_stream(void);
 
 /* 协议解析和命令分发函数 */
-static uint8_t adc_tcp_server_extract_command_payload(uint16_t *payload_len,
-                                                      uint16_t *data_len);
-static uint8_t adc_tcp_server_process_command_frame(struct tcp_pcb *tpcb);
+static uint8_t adc_tcp_server_build_command_payload(uint16_t *payload_len,
+                                                    uint16_t *data_len);
+static uint8_t adc_tcp_server_process_host_command_frame(struct tcp_pcb *tpcb);
 static uint16_t adc_tcp_server_payload_block_id(const uint8_t *payload);
 static void adc_tcp_server_parse_rx(struct tcp_pcb *tpcb);
-static void adc_tcp_server_handle_frame(struct tcp_pcb *tpcb,
-                                        uint8_t cmd,
-                                        const uint8_t *payload,
-                                        uint16_t payload_len);
+static void adc_tcp_server_dispatch_command(struct tcp_pcb *tpcb,
+                                            uint8_t cmd,
+                                            const uint8_t *payload,
+                                            uint16_t payload_len);
 
 static void adc_tcp_server_handle_write_param(struct tcp_pcb *tpcb,
                                               const uint8_t *payload,
@@ -417,6 +419,7 @@ static err_t adc_tcp_server_accept(void *arg,
     // ⑧ 注册回调函数
     tcp_arg(newpcb, NULL);
     tcp_recv(newpcb, adc_tcp_server_recv); // 接收回调
+    tcp_sent(newpcb, adc_tcp_server_sent);
     tcp_err(newpcb, adc_tcp_server_error); // 错误回调
 
     // ⑨ 注册周期 poll，用于检测空闲超时（上位机异常断电场景）
@@ -483,10 +486,24 @@ static err_t adc_tcp_server_recv(void *arg,
     return ERR_OK;
 }
 
+static err_t adc_tcp_server_sent(void *arg,
+                                 struct tcp_pcb *tpcb,
+                                 u16_t len)
+{
+    LWIP_UNUSED_ARG(arg);
+    LWIP_UNUSED_ARG(tpcb);
+    LWIP_UNUSED_ARG(len);
+
+    s_client_idle_polls = 0U;
+
+    return ERR_OK;
+}
+
 /**
  * @brief TCP 周期 poll 回调（空闲超时检测）
  * @details lwIP 按 tcp_poll 注册的间隔周期性调用本回调。
  *          每次累加空闲计数；收到数据时计数会在 recv 回调里清零。
+ *          收到上位机数据或发送数据被对端 ACK 时清零。
  *          连续 ADC_TCP_IDLE_TIMEOUT_POLLS 次（~30s）无收发活动则判定
  *          连接已"半开"（上位机异常断电未发 FIN/RST），主动 abort。
  * @param[in] arg:  用户参数（此处未使用）
@@ -926,8 +943,8 @@ static void adc_tcp_server_apply_control_param(const uint8_t *data,
     }
 }
 
-static uint8_t adc_tcp_server_extract_command_payload(uint16_t *payload_len,
-                                                      uint16_t *data_len)
+static uint8_t adc_tcp_server_build_command_payload(uint16_t *payload_len,
+                                                    uint16_t *data_len)
 {
     uint16_t block_id;
     uint16_t command_data_len;
@@ -963,7 +980,7 @@ static uint8_t adc_tcp_server_extract_command_payload(uint16_t *payload_len,
     return 1U;
 }
 
-static uint8_t adc_tcp_server_process_command_frame(struct tcp_pcb *tpcb)
+static uint8_t adc_tcp_server_process_host_command_frame(struct tcp_pcb *tpcb)
 {
     uint16_t data_len;
     uint16_t payload_len;
@@ -987,7 +1004,7 @@ static uint8_t adc_tcp_server_process_command_frame(struct tcp_pcb *tpcb)
         return 1U;
     }
 
-    if (0U == adc_tcp_server_extract_command_payload(&payload_len, &data_len))
+    if (0U == adc_tcp_server_build_command_payload(&payload_len, &data_len))
     {
         adc_tcp_server_remove_frame(ADC_PROTO_COMMAND_FRAME_SIZE);
         SEGGER_RTT_WriteString(0, "command payload too large\r\n");
@@ -998,10 +1015,10 @@ static uint8_t adc_tcp_server_process_command_frame(struct tcp_pcb *tpcb)
         return 1U;
     }
 
-    adc_tcp_server_handle_frame(tpcb,
-                                cmd,
-                                s_command_payload,
-                                payload_len);
+    adc_tcp_server_dispatch_command(tpcb,
+                                    cmd,
+                                    s_command_payload,
+                                    payload_len);
 
     adc_tcp_server_remove_frame(ADC_PROTO_COMMAND_FRAME_SIZE);
 
@@ -1055,7 +1072,7 @@ static void adc_tcp_server_parse_rx(struct tcp_pcb *tpcb)
         // ② 检查是否为固定格式命令
         if (0U != adc_proto_is_host_command(s_rx_buf[2]))
         {
-            if (0U == adc_tcp_server_process_command_frame(tpcb))
+            if (0U == adc_tcp_server_process_host_command_frame(tpcb))
             {
                 return;
             }
@@ -1086,10 +1103,10 @@ static void adc_tcp_server_parse_rx(struct tcp_pcb *tpcb)
  * @param[in] payload_len: 负载长度
  * @retval None
  */
-static void adc_tcp_server_handle_frame(struct tcp_pcb *tpcb,
-                                        uint8_t cmd,
-                                        const uint8_t *payload,
-                                        uint16_t payload_len)
+static void adc_tcp_server_dispatch_command(struct tcp_pcb *tpcb,
+                                            uint8_t cmd,
+                                            const uint8_t *payload,
+                                            uint16_t payload_len)
 {
     // ① 心跳命令处理
     if (ADC_PROTO_CMD_HEARTBEAT == cmd)

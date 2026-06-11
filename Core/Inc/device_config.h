@@ -6,19 +6,11 @@
 #define DEVICE_CONFIG_NAME_MAX_LEN 32U
 
 #define DEVICE_CONFIG_ADC_CHANNEL_COUNT 12U
-#define DEVICE_CONFIG_ADC_CAL_DEFAULT_K_RAW 10000L
-#define DEVICE_CONFIG_ADC_CAL_DEFAULT_B_RAW 100000L
-
-#define DEVICE_CONFIG_ADC_CAL_K_SCALE 0.00000001f
-#define DEVICE_CONFIG_ADC_CAL_B_SCALE 0.00000001f
 
 #define DEVICE_CONFIG_DAC_CHANNEL_COUNT 4U
 #define DEVICE_CONFIG_DAC_MODE_MANUAL 0U
 #define DEVICE_CONFIG_DAC_MODE_ADC_CASCADE 1U
 #define DEVICE_CONFIG_DAC_ADC_CH_INVALID 0xFFU
-#define DEVICE_CONFIG_DAC_CAL_DEFAULT_K_RAW 8190000L
-#define DEVICE_CONFIG_DAC_CAL_DEFAULT_B_RAW 0L
-#define DEVICE_CONFIG_DAC_CAL_K_SCALE 0.0001f
 
 typedef struct
 {
@@ -32,8 +24,8 @@ typedef struct
 
 typedef struct
 {
-    int32_t k_raw;
-    int32_t b_raw;
+    float k;
+    float b;
 } device_adc_cal_channel_t;
 
 typedef struct
@@ -46,8 +38,8 @@ typedef struct
     uint8_t mode;
     float manual_voltage;
     uint8_t adc_channel;
-    int32_t k_raw;
-    int32_t b_raw;
+    float k;
+    float b;
 } device_dac_channel_config_t;
 
 typedef struct
@@ -59,10 +51,8 @@ void device_config_init_defaults(void);
 
 const device_network_config_t *device_config_get_network(void);
 
-void device_config_set_network(const device_network_config_t *config);
+void device_config_set_network(const device_network_config_t *network_config);
 
-HAL_StatusTypeDef device_config_save_network(void);
-HAL_StatusTypeDef device_config_load_network(void);
 HAL_StatusTypeDef device_config_save_all(void);
 HAL_StatusTypeDef device_config_load_all(void);
 
@@ -83,10 +73,10 @@ void device_config_process_save(void);
 
 const device_adc_cal_config_t *device_config_get_adc_calibration(void);
 
-void device_config_set_adc_calibration(const device_adc_cal_config_t *config);
+void device_config_set_adc_calibration(const device_adc_cal_config_t *adc_cal_config);
 
 const device_dac_config_t *device_config_get_dac_config(void);
 
-void device_config_set_dac_config(const device_dac_config_t *config);
+void device_config_set_dac_config(const device_dac_config_t *dac_config);
 
 #endif /* __DEVICE_CONFIG_H */

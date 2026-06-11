@@ -3,6 +3,7 @@
 
 import argparse
 import socket
+import struct
 import zlib
 
 
@@ -13,8 +14,8 @@ CMD_WRITE_PARAM = 0x01
 BLOCK_CAL_DATA = 0x0001
 
 CHANNEL_COUNT = 12
-DEFAULT_K_RAW = 100_000_000
-DEFAULT_B_RAW = 0
+DEFAULT_K = 0.0001
+DEFAULT_B = 0.001
 
 FIXED_FRAME_LEN = 150
 FIXED_CRC_OFFSET = 144
@@ -39,16 +40,16 @@ def build_fixed_frame(cmd: int, block_id: int, data: bytes = b"") -> bytes:
     return bytes(frame)
 
 
-def build_cal_payload(test_channel: int, k_raw: int, b_raw: int) -> bytes:
+def build_cal_payload(test_channel: int, k: float, b: float) -> bytes:
     payload = bytearray()
 
     for ch in range(CHANNEL_COUNT):
         if ch == test_channel:
-            payload.extend(k_raw.to_bytes(4, "big", signed=True))
-            payload.extend(b_raw.to_bytes(4, "big", signed=True))
+            payload.extend(struct.pack(">f", k))
+            payload.extend(struct.pack(">f", b))
         else:
-            payload.extend(DEFAULT_K_RAW.to_bytes(4, "big", signed=True))
-            payload.extend(DEFAULT_B_RAW.to_bytes(4, "big", signed=True))
+            payload.extend(struct.pack(">f", DEFAULT_K))
+            payload.extend(struct.pack(">f", DEFAULT_B))
 
     return bytes(payload)
 
@@ -82,19 +83,19 @@ def main():
     parser.add_argument("--port", type=int, default=8080, help="device TCP port")
     parser.add_argument("--bind", default=None, help="optional local source IP")
     parser.add_argument("--channel", type=int, default=1, help="1-based channel number")
-    parser.add_argument("--k-raw", type=int, default=200_000_000, help="raw k value, 1e8 means 1.0")
-    parser.add_argument("--b-raw", type=int, default=0, help="raw b value")
+    parser.add_argument("--k", type=float, default=0.0002, help="calibration k value")
+    parser.add_argument("--b", type=float, default=0.0, help="calibration b value")
     args = parser.parse_args()
 
     if args.channel < 1 or args.channel > CHANNEL_COUNT:
         raise SystemExit("channel must be 1..12")
 
-    payload = build_cal_payload(args.channel - 1, args.k_raw, args.b_raw)
+    payload = build_cal_payload(args.channel - 1, args.k, args.b)
     frame = build_fixed_frame(CMD_WRITE_PARAM, BLOCK_CAL_DATA, payload)
 
     print(
-        f"write calibration: CH{args.channel} k_raw={args.k_raw} "
-        f"b_raw={args.b_raw}, payload={len(payload)} bytes"
+        f"write calibration: CH{args.channel} k={args.k} "
+        f"b={args.b}, payload={len(payload)} bytes"
     )
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)

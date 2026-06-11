@@ -16,13 +16,13 @@
 
 /**
  * @brief ADC 校准参数字节数
- * @details 12 个通道 × 2（k_raw + b_raw） × 4 字节/参数 = 96 字节
+ * @details 12 个通道 × 2（k + b） × 4 字节/参数 = 96 字节
  */
-#define ADC_CAL_PARAM_BYTES (DEVICE_CONFIG_ADC_CHANNEL_COUNT * 2U * sizeof(int32_t))
+#define ADC_CAL_PARAM_BYTES (DEVICE_CONFIG_ADC_CHANNEL_COUNT * 2U * sizeof(float))
 
 /**
  * @brief DAC 参数字节数（每个通道）
- * @details mode(1) + voltage(4) + adc_ch(1) + k_raw(4) + b_raw(4) = 14 字节
+ * @details mode(1) + voltage(4) + adc_ch(1) + k(4) + b(4) = 14 字节
  */
 #define DAC_PARAM_BYTES 14U
 
@@ -30,7 +30,7 @@
 
 /**
  * @brief ADC 校准数据缓冲区
- * @details 存储 12 个通道的校准参数（k_raw, b_raw）
+ * @details 存储 12 个通道的校准参数（k, b）
  */
 static uint8_t s_param_cal_data[128];
 
@@ -124,7 +124,7 @@ static uint8_t s_param_name[DEVICE_CONFIG_NAME_MAX_LEN];
  */
 static adc_param_block_t s_param_table[] =
     {
-        // 校准数据块（12 个通道的 k_raw 和 b_raw）
+        // 校准数据块（12 个通道的 k 和 b）
         {ADC_PARAM_BLOCK_CAL_DATA, s_param_cal_data,
          ADC_CAL_PARAM_BYTES, sizeof(s_param_cal_data)},
 
@@ -208,11 +208,11 @@ adc_param_block_t *adc_param_store_find_block(uint16_t block_id)
     {
         if (s_param_table[i].block_id == block_id)
         {
-            return &s_param_table[i];  // ✓ 找到匹配的参数块
+            return &s_param_table[i]; // ✓ 找到匹配的参数块
         }
     }
 
-    return NULL;  // ✗ 未找到
+    return NULL; // ✗ 未找到
 }
 
 /* ==================== Parameter Synchronization ==================== */
@@ -225,15 +225,15 @@ adc_param_block_t *adc_param_store_find_block(uint16_t block_id)
  * @param[in]  config: 源配置结构（来自 device_config）
  * @retval None
  *
- * @note 格式：[mode(1)] [voltage(4)] [adc_ch(1)] [k_raw(4)] [b_raw(4)]
+ * @note 格式：[mode(1)] [voltage(4)] [adc_ch(1)] [k(4)] [b(4)]
  */
 static void adc_param_store_sync_dac_param_block(uint8_t *buf,
                                                  const device_dac_channel_config_t
-                                                     *config)
+                                                     *dac_ch_config)
 {
     uint16_t index;
 
-    if ((NULL == buf) || (NULL == config))
+    if ((NULL == buf) || (NULL == dac_ch_config))
     {
         return;
     }
@@ -241,25 +241,25 @@ static void adc_param_store_sync_dac_param_block(uint8_t *buf,
     index = 0U;
 
     // ① 工作模式（1 字节）
-    buf[index++] = config->mode;
+    buf[index++] = dac_ch_config->mode;
 
     // ② 手动输出电压（4 字节，浮点数）
     adc_proto_put_float_be(buf,
                            &index,
-                           config->manual_voltage);
+                           dac_ch_config->manual_voltage);
 
     // ③ ADC 级联通道号（1 字节）
-    buf[index++] = config->adc_channel;
+    buf[index++] = dac_ch_config->adc_channel;
 
-    // ④ 校准参数 k_raw（4 字节，大端序）
-    adc_proto_put_u32_be(buf,
-                         &index,
-                         (uint32_t)config->k_raw);
+    // ④ 校准参数 k（4 字节，大端序）
+    adc_proto_put_float_be(buf,
+                           &index,
+                           dac_ch_config->k);
 
-    // ⑤ 校准参数 b_raw（4 字节，大端序）
-    adc_proto_put_u32_be(buf,
-                         &index,
-                         (uint32_t)config->b_raw);
+    // ⑤ 校准参数 b（4 字节，大端序）
+    adc_proto_put_float_be(buf,
+                           &index,
+                           dac_ch_config->b);
 }
 
 /**
@@ -274,53 +274,53 @@ static void adc_param_store_sync_dac_param_block(uint8_t *buf,
  */
 void adc_param_store_sync_from_config(void)
 {
-    const device_network_config_t *net_cfg;
-    const device_adc_cal_config_t *cal_cfg;
-    const device_dac_config_t *dac_cfg;
+    const device_network_config_t *network_config;
+    const device_adc_cal_config_t *adc_cal_config;
+    const device_dac_config_t *dac_config;
 
     uint16_t index;
     uint8_t ch;
 
     // ① 获取各模块的配置
-    net_cfg = device_config_get_network();
-    cal_cfg = device_config_get_adc_calibration();
-    dac_cfg = device_config_get_dac_config();
+    network_config = device_config_get_network();
+    adc_cal_config = device_config_get_adc_calibration();
+    dac_config = device_config_get_dac_config();
 
     // ② 同步网络配置
-    memcpy(s_param_ip_addr, net_cfg->ip, sizeof(net_cfg->ip));
-    memcpy(s_param_mac_addr, net_cfg->mac, sizeof(net_cfg->mac));
+    memcpy(s_param_ip_addr, network_config->ip, sizeof(network_config->ip));
+    memcpy(s_param_mac_addr, network_config->mac, sizeof(network_config->mac));
 
-    s_param_port[0] = (uint8_t)(net_cfg->tcp_port >> 8);    // 高字节
-    s_param_port[1] = (uint8_t)(net_cfg->tcp_port & 0xFFU); // 低字节
+    s_param_port[0] = (uint8_t)(network_config->tcp_port >> 8);    // 高字节
+    s_param_port[1] = (uint8_t)(network_config->tcp_port & 0xFFU); // 低字节
 
-    memcpy(s_param_netmask, net_cfg->netmask, sizeof(net_cfg->netmask));
-    memcpy(s_param_gateway, net_cfg->gateway, sizeof(net_cfg->gateway));
+    memcpy(s_param_netmask, network_config->netmask, sizeof(network_config->netmask));
+    memcpy(s_param_gateway, network_config->gateway, sizeof(network_config->gateway));
 
     // 同步设备名（读路径：READ_PARAM 0x000F 返回当前名，全长 32 字节）
-    memcpy(s_param_name, net_cfg->name, DEVICE_CONFIG_NAME_MAX_LEN);
+    memcpy(s_param_name, network_config->name, DEVICE_CONFIG_NAME_MAX_LEN);
 
     // ③ 同步 ADC 校准参数
     index = 0U;
     for (ch = 0U; ch < DEVICE_CONFIG_ADC_CHANNEL_COUNT; ch++)
     {
-        // 对每个通道存储 k_raw（4 字节）和 b_raw（4 字节）
-        adc_proto_put_u32_be(s_param_cal_data,
-                             &index,
-                             (uint32_t)cal_cfg->ch[ch].k_raw);
-        adc_proto_put_u32_be(s_param_cal_data,
-                             &index,
-                             (uint32_t)cal_cfg->ch[ch].b_raw);
+        // 对每个通道存储 k（4 字节）和 b（4 字节）
+        adc_proto_put_float_be(s_param_cal_data,
+                               &index,
+                               adc_cal_config->ch[ch].k);
+        adc_proto_put_float_be(s_param_cal_data,
+                               &index,
+                               adc_cal_config->ch[ch].b);
     }
 
     // ④ 同步 DAC 参数
     adc_param_store_sync_dac_param_block(s_param_da_ch1,
-                                         &dac_cfg->ch[0]);
+                                         &dac_config->ch[0]);
     adc_param_store_sync_dac_param_block(s_param_da_ch2,
-                                         &dac_cfg->ch[1]);
+                                         &dac_config->ch[1]);
     adc_param_store_sync_dac_param_block(s_param_da_ch3,
-                                         &dac_cfg->ch[2]);
+                                         &dac_config->ch[2]);
     adc_param_store_sync_dac_param_block(s_param_da_ch4,
-                                         &dac_cfg->ch[3]);
+                                         &dac_config->ch[3]);
 }
 
 /* ==================== Parameter Write Validation ==================== */
@@ -422,7 +422,7 @@ uint8_t adc_param_store_apply_network_param(uint16_t block_id,
                                             const uint8_t *data,
                                             uint16_t len)
 {
-    device_network_config_t net_cfg;
+    device_network_config_t next_network_config;
 
     if (NULL == data)
     {
@@ -430,28 +430,28 @@ uint8_t adc_param_store_apply_network_param(uint16_t block_id,
     }
 
     // ① 复制当前网络配置
-    memcpy(&net_cfg,
+    memcpy(&next_network_config,
            device_config_get_network(),
-           sizeof(net_cfg));
+           sizeof(next_network_config));
 
     // ② 根据参数块 ID 更新配置
     if (ADC_PARAM_BLOCK_IP_ADDR == block_id)
     {
-        if (len < sizeof(net_cfg.ip))
+        if (len < sizeof(next_network_config.ip))
         {
             SEGGER_RTT_WriteString(0, "net param ip bad len\r\n");
             return ADC_PROTO_WRITE_STATUS_BAD_LEN;
         }
-        memcpy(net_cfg.ip, data, sizeof(net_cfg.ip));
+        memcpy(next_network_config.ip, data, sizeof(next_network_config.ip));
     }
     else if (ADC_PARAM_BLOCK_MAC_ADDR == block_id)
     {
-        if (len < sizeof(net_cfg.mac))
+        if (len < sizeof(next_network_config.mac))
         {
             SEGGER_RTT_WriteString(0, "net param mac bad len\r\n");
             return ADC_PROTO_WRITE_STATUS_BAD_LEN;
         }
-        memcpy(net_cfg.mac, data, sizeof(net_cfg.mac));
+        memcpy(next_network_config.mac, data, sizeof(next_network_config.mac));
     }
     else if (ADC_PARAM_BLOCK_PORT == block_id)
     {
@@ -461,25 +461,25 @@ uint8_t adc_param_store_apply_network_param(uint16_t block_id,
             return ADC_PROTO_WRITE_STATUS_BAD_LEN;
         }
         // 从大端序字节构建端口号
-        net_cfg.tcp_port = (uint16_t)(((uint16_t)data[0] << 8) | data[1]);
+        next_network_config.tcp_port = (uint16_t)(((uint16_t)data[0] << 8) | data[1]);
     }
     else if (ADC_PARAM_BLOCK_NETMASK == block_id)
     {
-        if (len < sizeof(net_cfg.netmask))
+        if (len < sizeof(next_network_config.netmask))
         {
             SEGGER_RTT_WriteString(0, "net param mask bad len\r\n");
             return ADC_PROTO_WRITE_STATUS_BAD_LEN;
         }
-        memcpy(net_cfg.netmask, data, sizeof(net_cfg.netmask));
+        memcpy(next_network_config.netmask, data, sizeof(next_network_config.netmask));
     }
     else if (ADC_PARAM_BLOCK_GATEWAY == block_id)
     {
-        if (len < sizeof(net_cfg.gateway))
+        if (len < sizeof(next_network_config.gateway))
         {
             SEGGER_RTT_WriteString(0, "net param gateway bad len\r\n");
             return ADC_PROTO_WRITE_STATUS_BAD_LEN;
         }
-        memcpy(net_cfg.gateway, data, sizeof(net_cfg.gateway));
+        memcpy(next_network_config.gateway, data, sizeof(next_network_config.gateway));
     }
     else
     {
@@ -487,8 +487,8 @@ uint8_t adc_param_store_apply_network_param(uint16_t block_id,
     }
 
     // ③ 更新配置并设置脏标记
-    device_config_set_network(&net_cfg);
-    s_network_config_dirty = 1U;  // ← 标记网络参数已修改（驱动 netif 重配）
+    device_config_set_network(&next_network_config);
+    s_network_config_dirty = 1U; // ← 标记网络参数已修改（驱动 netif 重配）
 
     // ④ 请求延迟保存到 EEPROM（实际写入在主循环空闲点完成，不在此阻塞）
     device_config_request_save();
@@ -539,7 +539,7 @@ void adc_param_store_clear_network_dirty(void)
 uint8_t adc_param_store_apply_name_param(const uint8_t *data,
                                          uint16_t len)
 {
-    device_network_config_t net_cfg;
+    device_network_config_t next_network_config;
     uint16_t copy_len;
 
     // ① 验证输入
@@ -549,9 +549,9 @@ uint8_t adc_param_store_apply_name_param(const uint8_t *data,
     }
 
     // ② 复制当前网络配置
-    memcpy(&net_cfg,
+    memcpy(&next_network_config,
            device_config_get_network(),
-           sizeof(net_cfg));
+           sizeof(next_network_config));
 
     // ③ 截断到可用空间并强制 NUL 结尾
     copy_len = len;
@@ -560,12 +560,12 @@ uint8_t adc_param_store_apply_name_param(const uint8_t *data,
         copy_len = (uint16_t)(DEVICE_CONFIG_NAME_MAX_LEN - 1U);
     }
 
-    memset(net_cfg.name, 0, sizeof(net_cfg.name));
-    memcpy(net_cfg.name, data, copy_len);
-    // net_cfg.name 已 memset 清零，第 copy_len 字节即为 '\0'
+    memset(next_network_config.name, 0, sizeof(next_network_config.name));
+    memcpy(next_network_config.name, data, copy_len);
+    // next_network_config.name 已 memset 清零，第 copy_len 字节即为 '\0'
 
     // ④ 更新 device_config 并同步参数表
-    device_config_set_network(&net_cfg);
+    device_config_set_network(&next_network_config);
     adc_param_store_sync_from_config();
 
     // ⑤ 请求延迟保存（实际写入在主循环空闲点完成）
@@ -589,12 +589,12 @@ uint8_t adc_param_store_apply_name_param(const uint8_t *data,
  *         ADC_PROTO_WRITE_STATUS_BAD_LEN       = 参数长度不合法
  *
  * @note 校准参数格式：
- *       [CH0_k_raw(4)] [CH0_b_raw(4)] ... [CH11_k_raw(4)] [CH11_b_raw(4)]
+ *       [CH0_k(4)] [CH0_b(4)] ... [CH11_k(4)] [CH11_b(4)]
  */
 uint8_t adc_param_store_apply_cal_param(const uint8_t *data,
                                         uint16_t len)
 {
-    device_adc_cal_config_t cal;
+    device_adc_cal_config_t next_adc_cal_config;
     uint16_t index;
     uint8_t ch;
 
@@ -609,13 +609,13 @@ uint8_t adc_param_store_apply_cal_param(const uint8_t *data,
     // ② 解析校准参数
     for (ch = 0U; ch < DEVICE_CONFIG_ADC_CHANNEL_COUNT; ch++)
     {
-        // 从大端序数据流解析 k_raw 和 b_raw
-        cal.ch[ch].k_raw = adc_proto_get_i32_be(data, &index);
-        cal.ch[ch].b_raw = adc_proto_get_i32_be(data, &index);
+        // 从大端序数据流解析 k 和 b
+        next_adc_cal_config.ch[ch].k = adc_proto_get_float_be(data, &index);
+        next_adc_cal_config.ch[ch].b = adc_proto_get_float_be(data, &index);
     }
 
     // ③ 更新 device_config
-    device_config_set_adc_calibration(&cal);
+    device_config_set_adc_calibration(&next_adc_cal_config);
 
     // ④ 同步参数表
     adc_param_store_sync_from_config();
@@ -643,7 +643,7 @@ uint8_t adc_param_store_apply_cal_param(const uint8_t *data,
  *         ADC_PROTO_WRITE_STATUS_NOT_FOUND     = 参数块 ID 无效
  *
  * @note DAC 参数格式：
- *       [mode(1)] [voltage(4)] [adc_ch(1)] [k_raw(4)] [b_raw(4)]
+ *       [mode(1)] [voltage(4)] [adc_ch(1)] [k(4)] [b(4)]
  *
  *       其中 mode 可以是：
  *       - DEVICE_CONFIG_DAC_MODE_MANUAL      = 手动输出模式
@@ -653,7 +653,7 @@ uint8_t adc_param_store_apply_dac_param(uint16_t block_id,
                                         const uint8_t *data,
                                         uint16_t len)
 {
-    device_dac_config_t dac_config;
+    device_dac_config_t next_dac_config;
     uint16_t index;
     uint8_t dac_ch;
 
@@ -674,39 +674,39 @@ uint8_t adc_param_store_apply_dac_param(uint16_t block_id,
     dac_ch = (uint8_t)(block_id - ADC_PARAM_BLOCK_DA_CH1);
 
     // ④ 复制当前 DAC 配置
-    memcpy(&dac_config,
+    memcpy(&next_dac_config,
            device_config_get_dac_config(),
-           sizeof(dac_config));
+           sizeof(next_dac_config));
 
     index = 0U;
 
     // ⑤ 解析 DAC 参数
-    dac_config.ch[dac_ch].mode = data[index++];  // 工作模式
+    next_dac_config.ch[dac_ch].mode = data[index++]; // 工作模式
 
-    dac_config.ch[dac_ch].manual_voltage = adc_proto_get_float_be(data, &index);  // 输出电压
+    next_dac_config.ch[dac_ch].manual_voltage = adc_proto_get_float_be(data, &index); // 输出电压
 
-    dac_config.ch[dac_ch].adc_channel = data[index++];  // ADC 级联通道
+    next_dac_config.ch[dac_ch].adc_channel = data[index++]; // ADC 级联通道
 
-    dac_config.ch[dac_ch].k_raw = adc_proto_get_i32_be(data, &index);  // 校准参数 k
+    next_dac_config.ch[dac_ch].k = adc_proto_get_float_be(data, &index); // 校准参数 k
 
-    dac_config.ch[dac_ch].b_raw = adc_proto_get_i32_be(data, &index);  // 校准参数 b
+    next_dac_config.ch[dac_ch].b = adc_proto_get_float_be(data, &index); // 校准参数 b
 
     // ⑥ 参数合法性检查
     // 检查工作模式
-    if (dac_config.ch[dac_ch].mode > DEVICE_CONFIG_DAC_MODE_ADC_CASCADE)
+    if (next_dac_config.ch[dac_ch].mode > DEVICE_CONFIG_DAC_MODE_ADC_CASCADE)
     {
         return ADC_PROTO_WRITE_STATUS_BAD_LEN;
     }
 
     // 检查 ADC 级联模式中的 ADC 通道号
-    if ((DEVICE_CONFIG_DAC_MODE_ADC_CASCADE == dac_config.ch[dac_ch].mode) &&
-        (dac_config.ch[dac_ch].adc_channel >= DEVICE_CONFIG_ADC_CHANNEL_COUNT))
+    if ((DEVICE_CONFIG_DAC_MODE_ADC_CASCADE == next_dac_config.ch[dac_ch].mode) &&
+        (next_dac_config.ch[dac_ch].adc_channel >= DEVICE_CONFIG_ADC_CHANNEL_COUNT))
     {
         return ADC_PROTO_WRITE_STATUS_BAD_LEN;
     }
 
     // ⑦ 更新 device_config
-    device_config_set_dac_config(&dac_config);
+    device_config_set_dac_config(&next_dac_config);
 
     // ⑧ 同步参数表
     adc_param_store_sync_from_config();

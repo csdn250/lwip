@@ -13,23 +13,23 @@ STM32H743 + lwIP based AD/DA data collection firmware.
 mode             1 byte
 manual_voltage   4 bytes, float32_be
 adc_channel      1 byte
-k_raw            4 bytes, int32_be
-b_raw            4 bytes, int32_be
+k                4 bytes, float32_be
+b                4 bytes, float32_be
 ```
 
 - Manual DAC output formula:
 
 ```text
-dac_code = round(manual_voltage * (k_raw * DEVICE_CONFIG_DAC_CAL_K_SCALE) + b_raw)
+dac_code = round(manual_voltage * k + b)
 dac_code is clamped to 0..4095
 ```
 
 - Default DAC calibration currently assumes `0V..5V -> 0..4095`:
 
 ```text
-DEVICE_CONFIG_DAC_CAL_DEFAULT_K_RAW = 8190000
-DEVICE_CONFIG_DAC_CAL_K_SCALE       = 0.0001
-effective k                         = 819.0 code/V
+k = 819.0
+b = 0.0
+effective k = 819.0 code/V
 ```
 
 - Dynamic read-only block `0x000E` returns the latest DAC output code snapshot:
@@ -45,7 +45,7 @@ Verified example:
 
 ```text
 Write DA1 block 0x0009:
-mode=0, manual_voltage=2.5f, adc_channel=0xFF, k_raw=8190000, b_raw=0
+mode=0, manual_voltage=2.5f, adc_channel=0xFF, k=819.0f, b=0.0f
 
 Read DAC status block 0x000E:
 DA1_code = 0x0800 = 2048
@@ -161,7 +161,7 @@ BLOCK_ID_H BLOCK_ID_L
 
 | Block ID | 说明 |
 | --- | --- |
-| `0x0001` | ADC 标定参数，12 通道，每通道 `k_raw` + `b_raw` |
+| `0x0001` | ADC 标定参数，12 通道，每通道 `k` + `b`，均为 `float32_be` |
 | `0x0002` | 控制参数，启动/停止 ADC 数据上传 |
 | `0x0003` | 配置参数预留 |
 | `0x0004` | 设备 IP / 上位机 IP |
@@ -187,17 +187,18 @@ BLOCK_ID_H BLOCK_ID_L
 `0x0001` 数据区长度为 96 字节：
 
 ```text
-CH1 k_raw int32_be
-CH1 b_raw int32_be
+CH1 k float32_be
+CH1 b float32_be
 ...
-CH12 k_raw int32_be
-CH12 b_raw int32_be
+CH12 k float32_be
+CH12 b float32_be
 ```
 
 换算规则：
 
 ```text
-adc_value = adc_raw * (k_raw * 0.00000001) + b_raw
+k 和 b 为可通过 TCP 写入并保存到 EEPROM 的运行时标定参数。
+adc_value = adc_raw * k + b
 ```
 
 ### 控制参数
@@ -225,8 +226,8 @@ enable stream_type
 mode             1 byte
 manual_voltage   4 bytes, float32_be
 adc_channel      1 byte
-k_raw            4 bytes, int32_be
-b_raw            4 bytes, int32_be
+k                4 bytes, float32_be
+b                4 bytes, float32_be
 ```
 
 字段含义：
@@ -235,20 +236,20 @@ b_raw            4 bytes, int32_be
 - `mode = 1`: ADC 级联输出，选择 `adc_channel`
 - `manual_voltage`: 手动模式下的目标输出电压，`float32_be`
 - `adc_channel`: 级联模式下选择 ADC 逻辑通道 `0..11`
-- `k_raw / b_raw`: DAC 标定参数，用于把电压换算成 DAC 整数码值
+- `k / b`: DAC 标定参数，均为 `float32_be`，用于把电压换算成 DAC 整数码值
 
 手动 DAC 计算：
 
 ```text
-dac_code = round(manual_voltage * (k_raw * DEVICE_CONFIG_DAC_CAL_K_SCALE) + b_raw)
+dac_code = round(manual_voltage * k + b)
 dac_code = limit(dac_code, 0, 4095)
 ```
 
 默认 DAC 标定按 `0V..5V -> 0..4095`：
 
 ```text
-k_raw = 8190000
-DEVICE_CONFIG_DAC_CAL_K_SCALE = 0.0001
+k = 819.0
+b = 0.0
 effective k = 819.0 code/V
 ```
 
@@ -256,8 +257,8 @@ ADC 到 DAC 级联计算：
 
 ```text
 adc_value = adc_raw * adc_k + adc_b
-dac_value = adc_value * dac_k + dac_b
-dac_code  = round(dac_value), then limit to 0..4095
+dac_code  = round(adc_value * dac_k + dac_b)
+dac_code  = limit(dac_code, 0, 4095)
 ```
 
 ### RAM 日志快照
@@ -457,6 +458,41 @@ python .\tcp_stream_monitor.py --host 192.168.1.21 --bind 192.168.1.20 --type co
 ```powershell
 ping -S 192.168.1.20 192.168.1.21
 ```
+
+## TCP 连接超时
+
+固件使用 `tcp_poll` 做 TCP 连接级空闲巡检，用来清理半开连接。例如上位机崩溃、异常断电、网线被拔掉时，单片机可能收不到正常的 FIN/RST，`s_client_pcb` 会一直占用，导致新客户端被拒绝。
+
+当前逻辑：
+
+- `tcp_recv` 收到上位机数据时清零空闲计数。
+- `tcp_sent` 收到上位机对 MCU 发送数据的 ACK 时清零空闲计数。
+- `tcp_poll` 约每 1 秒累加一次空闲计数。
+- 如果约 30 秒内既没有收到上位机数据，也没有收到对端 ACK，固件会调用 `tcp_abort()`，清理 `s_client_pcb`，允许新客户端重新连接。
+
+空闲网络助手连接约 30 秒后被断开是预期现象：
+
+```text
+tcp accept
+tcp idle timeout abort
+udp discovery broadcast
+tcp accept
+```
+
+ADC 数据流持续上传时不应被误判为空闲，因为上位机持续 ACK MCU 发送的数据。测试命令：
+
+```powershell
+cd C:\Users\myw29\Desktop\ADDA_collect\adc_collect\tools
+python .\tcp_stream_monitor.py --host 192.168.1.21 --bind 192.168.1.20 --type raw --duration 45
+```
+
+期望结果：
+
+```text
+summary: elapsed=45.xx, gap=0, overlap=0, bad=0
+```
+
+RTT 应看到 `adc stream start` 和 `adc stream stop`，45 秒数据流期间不应出现 `tcp idle timeout abort`。
 
 ## 已验证功能
 

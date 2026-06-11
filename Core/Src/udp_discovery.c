@@ -114,7 +114,7 @@ static uint32_t udp_discovery_crc32(const uint8_t *data, uint16_t len)
 
 static uint16_t udp_discovery_build_payload(uint8_t *payload, uint16_t payload_size)
 {
-    const device_network_config_t *net_cfg;
+    const device_network_config_t *network_config;
     uint16_t index = 0U;
 
     if (58U > payload_size)
@@ -122,7 +122,7 @@ static uint16_t udp_discovery_build_payload(uint8_t *payload, uint16_t payload_s
         return 0U;
     }
 
-    net_cfg = device_config_get_network();
+    network_config = device_config_get_network();
 
     payload[index++] = 'A';
     payload[index++] = 'D';
@@ -144,22 +144,22 @@ static uint16_t udp_discovery_build_payload(uint8_t *payload, uint16_t payload_s
 
     index++;
 
-    memcpy(&payload[index], net_cfg->mac, sizeof(net_cfg->mac));
-    index += sizeof(net_cfg->mac);
+    memcpy(&payload[index], network_config->mac, sizeof(network_config->mac));
+    index += sizeof(network_config->mac);
 
-    memcpy(&payload[index], net_cfg->ip, sizeof(net_cfg->ip));
-    index += sizeof(net_cfg->ip);
+    memcpy(&payload[index], network_config->ip, sizeof(network_config->ip));
+    index += sizeof(network_config->ip);
 
-    memcpy(&payload[index], net_cfg->netmask, sizeof(net_cfg->netmask));
-    index += sizeof(net_cfg->netmask);
+    memcpy(&payload[index], network_config->netmask, sizeof(network_config->netmask));
+    index += sizeof(network_config->netmask);
 
-    memcpy(&payload[index], net_cfg->gateway, sizeof(net_cfg->gateway));
-    index += sizeof(net_cfg->gateway);
+    memcpy(&payload[index], network_config->gateway, sizeof(network_config->gateway));
+    index += sizeof(network_config->gateway);
 
-    payload[index++] = (uint8_t)(net_cfg->tcp_port >> 8);
-    payload[index++] = (uint8_t)(net_cfg->tcp_port & 0xFFU);
+    payload[index++] = (uint8_t)(network_config->tcp_port >> 8);
+    payload[index++] = (uint8_t)(network_config->tcp_port & 0xFFU);
 
-    memcpy(&payload[index], net_cfg->name, DEVICE_CONFIG_NAME_MAX_LEN);
+    memcpy(&payload[index], network_config->name, DEVICE_CONFIG_NAME_MAX_LEN);
     index += DEVICE_CONFIG_NAME_MAX_LEN;
 
     return index;

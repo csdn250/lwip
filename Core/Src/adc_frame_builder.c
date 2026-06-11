@@ -119,7 +119,6 @@ uint16_t adc_frame_builder_build_cal_float_batch(const adc_acq_sample_t *samples
     uint16_t offset;
     uint16_t payload_bytes;
     float value;
-    float k;
 
     if ((NULL == samples) ||
         (NULL == cal_config) ||
@@ -155,8 +154,8 @@ uint16_t adc_frame_builder_build_cal_float_batch(const adc_acq_sample_t *samples
 
     /*
      * Calibration format:
-     *   k_raw is stored as k / 0.00000001
-     *   converted = raw * k + b_raw
+     *   converted = raw * k + b
+     *   k/b are stored as float values in device_config.
      */
     for (sample_index = 0U; sample_index < sample_count; sample_index++)
     {
@@ -164,9 +163,10 @@ uint16_t adc_frame_builder_build_cal_float_batch(const adc_acq_sample_t *samples
         {
             if (0U != (channel_mask & (1U << ch)))
             {
-                k = (float)cal_config->ch[ch].k_raw * DEVICE_CONFIG_ADC_CAL_K_SCALE;
-                value = ((float)samples[sample_index].raw[ch] * k) +
-                        ((float)cal_config->ch[ch].b_raw * DEVICE_CONFIG_ADC_CAL_B_SCALE);
+                value = ((float)samples[sample_index].raw[ch] *
+                         cal_config->ch[ch].k) +
+                        cal_config->ch[ch].b;
+
                 adc_frame_builder_put_float_be(out_buf, &offset, value);
             }
         }
