@@ -10,12 +10,14 @@
 #include "SEGGER_RTT.h"
 
 #include "app_log.h"
+#include "app_log_persist.h"
 #include "adc_acq_service.h"
 #include "adc_tcp_server.h"
 #include "eeprom_storage.h"
 #include "device_config.h"
 #include "udp_discovery.h"
 #include "dac_output_service.h"
+#include "adc_status_service.h"
 
 /* ================== Function Prototypes ================== */
 
@@ -78,6 +80,8 @@ int main(void)
   App_LogResetCause(); // 记录复位原因（用于故障排查）
 
   device_config_init_defaults(); // 初始化设备配置（使用默认值）
+
+  adc_status_service_init();
 
   // ====== Stage 4: Hardware Peripherals ======
   // GPIO 和 DMA 必须首先初始化，因为其他外设可能依赖它们
@@ -153,16 +157,76 @@ int main(void)
     // 只在非 TCP 数据流模式下允许 DAC 级联消费 ADC 采样。
     if (0U == adc_tcp_server_is_streaming())
     {
-      dac_output_service_process_adc_cascade();
+      // TCP 流没开：
+      // 如果 DAC 级联开了，让 DAC 级联消费 ADC
+      // 否则，让状态服务消费 ADC，保证心跳平均值刷新
+      if (0U != dac_output_service_is_adc_cascade_enabled())
+      {
+        dac_output_service_process_adc_cascade();
+      }
+      else
+      {
+        adc_status_service_process();
+      }
     }
 
-    udp_discovery_process();
+    // udp_discovery_process();
 
     /*
      * 参数写入命令只修改 RAM 镜像并置保存标记；
      * 真正的 EEPROM 写入放在主循环空闲点执行，避免阻塞 TCP 回调。
      */
     device_config_process_save();
+
+    app_log_persist_process();
+
+    adc_acq_stats_t adc_stats;
+    static uint32_t s_last_adc_sample_seq;
+    uint32_t state_flags = 0U;
+    uint32_t alarm_flags = 0U;
+
+    adc_acq_service_get_stats(&adc_stats);
+
+    if (0U != adc_tcp_server_has_client())
+    {
+      state_flags |= ADC_STATUS_STATE_TCP_CONNECTED;
+    }
+
+    if (0U != adc_tcp_server_is_streaming())
+    {
+      state_flags |= ADC_STATUS_STATE_ADC_STREAMING;
+    }
+
+    if (0U != dac_output_service_is_adc_cascade_enabled())
+    {
+      state_flags |= ADC_STATUS_STATE_DAC_CASCADE;
+    }
+
+    if (0U != dac_output_service_is_manual_enabled())
+    {
+      state_flags |= ADC_STATUS_STATE_DAC_MANUAL;
+    }
+
+    if (0U != eeprom_storage_is_ready())
+    {
+      state_flags |= ADC_STATUS_STATE_EEPROM_READY;
+    }
+    else
+    {
+      alarm_flags |= ADC_STATUS_ALARM_EEPROM_NOT_READY;
+    }
+
+    if (adc_stats.sample_seq != s_last_adc_sample_seq)
+    {
+      state_flags |= ADC_STATUS_STATE_ADC_DMA_ACTIVE;
+      s_last_adc_sample_seq = adc_stats.sample_seq;
+    }
+    else
+    {
+      alarm_flags |= ADC_STATUS_ALARM_ADC_DMA_STOPPED;
+    }
+
+    adc_status_service_set_runtime_flags(state_flags, alarm_flags);
 
     App_RefreshWatchdog();
   }

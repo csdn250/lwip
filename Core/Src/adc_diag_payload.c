@@ -2,6 +2,7 @@
 
 #include "adc_proto.h"
 #include "app_log.h"
+#include "app_log_persist.h"
 #include "dac_output_service.h"
 #include "device_config.h"
 
@@ -34,6 +35,44 @@ uint16_t adc_diag_payload_build_log_snapshot(uint8_t *payload,
     payload[index++] = (uint8_t)count;
     payload[index++] = ADC_LOG_RECORD_WIRE_BYTES;
     payload[index++] = 0U;
+
+    for (i = 0U; i < count; i++)
+    {
+        if ((uint16_t)(index + ADC_LOG_RECORD_WIRE_BYTES) > max_len)
+        {
+            break;
+        }
+
+        adc_proto_put_u32_be(payload, &index, s_log_snapshot_records[i].tick_ms);
+        adc_proto_put_u16_be(payload, &index, s_log_snapshot_records[i].event);
+        adc_proto_put_u16_be(payload, &index, s_log_snapshot_records[i].arg0);
+        adc_proto_put_u32_be(payload, &index, s_log_snapshot_records[i].arg1);
+        adc_proto_put_u32_be(payload, &index, s_log_snapshot_records[i].arg2);
+    }
+
+    return index;
+}
+
+uint16_t adc_diag_payload_build_persist_log_snapshot(uint8_t *payload,
+                                                     uint16_t max_len)
+{
+    uint16_t index;
+    uint16_t count;
+    uint16_t i;
+
+    if ((NULL == payload) || (max_len < ADC_LOG_SNAPSHOT_HEADER_BYTES))
+    {
+        return 0U;
+    }
+
+    count = app_log_persist_load(s_log_snapshot_records,
+                                 ADC_LOG_SNAPSHOT_MAX_RECORDS);
+
+    index = 0U;
+    payload[index++] = ADC_LOG_SNAPSHOT_VERSION;
+    payload[index++] = (uint8_t)count;
+    payload[index++] = ADC_LOG_RECORD_WIRE_BYTES;
+    payload[index++] = 1U; /* 1 = EEPROM persistent snapshot */
 
     for (i = 0U; i < count; i++)
     {

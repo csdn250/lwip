@@ -2,6 +2,116 @@
 
 STM32H743 + lwIP based AD/DA data collection firmware.
 
+## Heartbeat Status Payload
+
+2026-06-12 update:
+
+Command `0x07` replies with a fixed 150-byte command frame whose data payload
+is a device status snapshot.
+
+Heartbeat data payload:
+
+```text
+status              1 byte, 0 = OK
+alarm_flags         4 bytes, uint32_be
+state_flags         4 bytes, uint32_be
+avg_sample_count    4 bytes, uint32_be
+adc_avg[12]        48 bytes, 12 * float32_be raw-average values
+dac_code[4]         8 bytes, 4 * uint16_be latest DAC output codes
+```
+
+Current `state_flags` bits:
+
+```text
+bit0 TCP_CONNECTED
+bit1 ADC_STREAMING
+bit2 DAC_CASCADE
+bit3 EEPROM_READY
+bit4 ADC_DMA_ACTIVE
+bit5 DAC_MANUAL
+```
+
+Current `alarm_flags` bits:
+
+```text
+bit0 EEPROM_NOT_READY
+bit1 ADC_DMA_STOPPED
+bit2 TCP_SEND_FAIL
+```
+
+The ADC averages are maintained in firmware even when the high-speed ADC TCP
+stream is not enabled, so the PC can poll heartbeat at any time to obtain the
+latest averaged ADC values and device health flags.
+
+Validation helper:
+
+```powershell
+python tools\read_heartbeat_status.py --host 192.168.1.21 --bind 192.168.1.20
+```
+
+## ADC Stream Payload
+
+2026-06-12 update:
+
+ADC stream commands `0x81` and `0x82` still use the common outer protocol frame:
+
+```text
+12 34 CMD LEN_H LEN_L PAYLOAD CRC32 56 78
+```
+
+TCP is a byte stream. The PC must parse complete frames by `12 34 + LEN +
+CRC32 + 56 78`; one socket receive is not guaranteed to be one complete ADC
+frame.
+
+For easier PC-side processing, the outer ADC stream `PAYLOAD` length is fixed:
+
+```text
+outer payload length = 1406 bytes = 0x057E
+```
+
+The first 20 bytes of this 1406-byte payload are the ADC inner header:
+
+```text
+magic          uint32_be  0x41444331, ASCII "ADC1"
+seq            uint32_be  first sample sequence in this ADC payload
+timestamp_us   uint32_be  currently mirrors sample/debug timestamp
+channel_mask   uint16_be  0x0FFF means CH1..CH12
+channel_count  uint16_be  normally 12
+sample_format  uint16_be  0x81 raw uint16, 0x82 converted float32
+payload_bytes  uint16_be  valid sample bytes after this header
+```
+
+Bytes after the valid `payload_bytes` region are zero padding and must not be
+parsed as ADC samples.
+
+Current fixed-payload packing:
+
+```text
+raw 0x81:
+  valid groups       = 57
+  valid sample bytes = 57 * 12 * 2 = 1368 = 0x0558
+  padding bytes      = 1406 - 20 - 1368 = 18
+
+converted 0x82:
+  valid groups       = 28
+  valid sample bytes = 28 * 12 * 4 = 1344 = 0x0540
+  padding bytes      = 1406 - 20 - 1344 = 42
+```
+
+Validation helper:
+
+```powershell
+python tools\tcp_stream_monitor.py --host 192.168.1.21 --bind 192.168.1.20 --type raw --duration 5
+python tools\tcp_stream_monitor.py --host 192.168.1.21 --bind 192.168.1.20 --type converted --duration 5
+```
+
+Expected monitor fields:
+
+```text
+raw:       group=57, outer_payload=1406, valid_payload=1368
+converted: group=28, outer_payload=1406, valid_payload=1344
+```
+
 ## DAC Output And Calibration
 
 2026-06-12 update:

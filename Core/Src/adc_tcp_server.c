@@ -11,7 +11,9 @@
 #include "adc_diag_payload.h"
 #include "adc_frame_builder.h"
 #include "dac_output_service.h"
+#include "adc_status_service.h"
 #include "app_log.h"
+#include "app_log_persist.h"
 
 #include <string.h>
 
@@ -30,6 +32,12 @@
 /** @brief ADC 数据流发送控制参数 */
 // 每次循环最多发送 32 帧
 #define ADC_STREAM_MAX_FRAMES_PER_PUMP 32U
+/*
+ * ADC stream uses a fixed 1406-byte payload.
+ * If samples are not enough to fill one payload, send a zero-padded frame
+ * after this timeout so the PC can still receive fresh data.
+ */
+#define ADC_STREAM_MAX_ASSEMBLE_MS 5U
 // TCP 发送缓冲区预留边际（字节）
 #define ADC_STREAM_TCP_SEND_MARGIN ADC_PROTO_COMMAND_FRAME_SIZE
 
@@ -78,6 +86,19 @@ static uint8_t s_adc_stream_type = ADC_STREAM_TYPE_RAW;
 
 /** @brief ADC 数据流序列号（用于确保数据完整性） */
 static uint32_t s_adc_stream_seq;
+
+/**
+ * @brief ADC stream pending sample count.
+ * @details Samples are staged here until a full fixed-size payload can be sent,
+ *          or until ADC_STREAM_MAX_ASSEMBLE_MS expires.
+ */
+static uint16_t s_adc_stream_pending_count;
+
+/**
+ * @brief Tick when current ADC stream pending batch started.
+ * @details Used to avoid waiting forever when sample rate is low.
+ */
+static uint32_t s_adc_stream_pending_tick;
 
 /** @brief 上次发送调试状态的时间戳 */
 #if ADC_TCP_DEBUG_STATUS_ENABLE
@@ -130,6 +151,12 @@ static uint8_t s_command_payload[ADC_PROTO_COMMAND_BLOCK_ID_SIZE +
  */
 static uint8_t s_diag_payload[ADC_PROTO_COMMAND_DATA_CAPACITY];
 
+/*
+ * 心跳回复 payload:
+ * status + alarm_flags + state_flags + avg_sample_count + 12 路 ADC 平均值。
+ */
+static uint8_t s_heartbeat_payload[ADC_PROTO_COMMAND_DATA_CAPACITY];
+
 /**
  * @brief ADC 数据流采样缓冲区
  * @details 临时存储从 ADC 采集服务读取的采样数据
@@ -147,20 +174,26 @@ uint8_t adc_tcp_server_has_client(void);
 static err_t adc_tcp_server_accept(void *arg,
                                    struct tcp_pcb *newpcb,
                                    err_t err);
+
 static err_t adc_tcp_server_recv(void *arg,
                                  struct tcp_pcb *tpcb,
                                  struct pbuf *p,
                                  err_t err);
+
 static err_t adc_tcp_server_sent(void *arg,
                                  struct tcp_pcb *tpcb,
                                  u16_t len);
 static err_t adc_tcp_server_poll(void *arg, struct tcp_pcb *tpcb);
+
 static void adc_tcp_server_error(void *arg, err_t err);
+
 static void adc_tcp_server_close_client(struct tcp_pcb *tpcb);
 
 /* 接收缓冲区操作函数 */
 static void adc_tcp_server_store_pbuf(struct tcp_pcb *tpcb, struct pbuf *p);
+
 static void adc_tcp_server_drop_one_rx_byte(void);
+
 static void adc_tcp_server_remove_frame(uint16_t frame_len);
 
 /* TX 协议发送：ADC数据流普通帧、固定150字节命令回复 */
@@ -168,14 +201,19 @@ static err_t adc_tcp_server_send_stream_frame(struct tcp_pcb *tpcb,
                                               uint8_t cmd,
                                               const uint8_t *payload,
                                               uint16_t payload_len);
+
 static err_t adc_tcp_server_send_command_frame(struct tcp_pcb *tpcb,
                                                uint8_t cmd,
                                                uint16_t block_id,
                                                const uint8_t *data,
                                                uint16_t data_len);
+
+static uint16_t adc_tcp_server_build_heartbeat_payload(void);
+
 static err_t adc_tcp_server_send_write_status(struct tcp_pcb *tpcb,
                                               uint16_t block_id,
                                               uint8_t status);
+
 static err_t adc_tcp_server_send_read_status(struct tcp_pcb *tpcb,
                                              uint16_t block_id,
                                              uint8_t status);
@@ -183,15 +221,21 @@ static err_t adc_tcp_server_send_read_status(struct tcp_pcb *tpcb,
 /* 协议命令处理函数 */
 static void adc_tcp_server_apply_control_param(const uint8_t *data,
                                                uint16_t len);
+
 static void adc_tcp_server_start_stream(uint8_t stream_type);
+
 static void adc_tcp_server_disable_stream(void);
 
 /* 协议解析和命令分发函数 */
 static uint8_t adc_tcp_server_build_command_payload(uint16_t *payload_len,
                                                     uint16_t *data_len);
+
 static uint8_t adc_tcp_server_process_host_command_frame(struct tcp_pcb *tpcb);
+
 static uint16_t adc_tcp_server_payload_block_id(const uint8_t *payload);
+
 static void adc_tcp_server_parse_rx(struct tcp_pcb *tpcb);
+
 static void adc_tcp_server_dispatch_command(struct tcp_pcb *tpcb,
                                             uint8_t cmd,
                                             const uint8_t *payload,
@@ -211,9 +255,14 @@ static void adc_tcp_server_handle_read_param(struct tcp_pcb *tpcb,
 
 /* ADC 数据流处理函数 */
 static uint8_t adc_tcp_server_can_send_bytes(uint16_t need_len);
-static uint16_t adc_tcp_server_collect_stream_samples(uint16_t max_sample_count);
+
+static uint16_t adc_tcp_server_collect_stream_samples(uint16_t sample_offset,
+                                                      uint16_t max_sample_count);
+
 static uint16_t adc_tcp_server_build_stream_payload(uint16_t sample_count);
+
 static uint16_t adc_tcp_server_get_stream_batch_count(void);
+
 static void adc_tcp_server_pump_adc_stream(void);
 
 #if ADC_TCP_DEBUG_STATUS_ENABLE
@@ -779,6 +828,45 @@ static err_t adc_tcp_server_send_stream_frame(struct tcp_pcb *tpcb,
     return tcp_output(tpcb);
 }
 
+static uint16_t adc_tcp_server_build_heartbeat_payload(void)
+{
+    adc_status_snapshot_t snapshot;
+    uint16_t dac_codes[DEVICE_CONFIG_DAC_CHANNEL_COUNT];
+    uint16_t offset = 0U;
+    uint8_t ch;
+
+    adc_status_service_get_snapshot(&snapshot);
+    memset(s_heartbeat_payload, 0, sizeof(s_heartbeat_payload));
+    dac_output_service_get_current_codes(dac_codes,
+                                         DEVICE_CONFIG_DAC_CHANNEL_COUNT);
+
+    s_heartbeat_payload[offset++] = ADC_PROTO_WRITE_STATUS_OK;
+
+    adc_proto_put_u32_be(s_heartbeat_payload,
+                         &offset,
+                         snapshot.alarm_flags);
+    adc_proto_put_u32_be(s_heartbeat_payload,
+                         &offset,
+                         snapshot.state_flags);
+    adc_proto_put_u32_be(s_heartbeat_payload,
+                         &offset,
+                         snapshot.avg_sample_count);
+
+    for (ch = 0U; ch < ADC_ACQ_CHANNEL_COUNT; ch++)
+    {
+        adc_proto_put_float_be(s_heartbeat_payload,
+                               &offset,
+                               snapshot.adc_avg[ch]);
+    }
+
+    for (ch = 0U; ch < DEVICE_CONFIG_DAC_CHANNEL_COUNT; ch++)
+    {
+        adc_proto_put_u16_be(s_heartbeat_payload, &offset, dac_codes[ch]);
+    }
+
+    return offset;
+}
+
 /**
  * @brief 构建并发送固定格式协议帧
  * @details 用于读写参数、心跳等固定格式命令
@@ -889,6 +977,8 @@ static void adc_tcp_server_start_stream(uint8_t stream_type)
     }
     s_adc_stream_seq = 0U; // 重置序列号
     s_adc_stream_enabled = 1U;
+    s_adc_stream_pending_count = 0U;
+    s_adc_stream_pending_tick = HAL_GetTick();
 
     SEGGER_RTT_WriteString(0, "adc stream start\r\n");
     app_log_record(APP_LOG_EVENT_ADC_STREAM_START,
@@ -904,6 +994,8 @@ static void adc_tcp_server_start_stream(uint8_t stream_type)
 static void adc_tcp_server_disable_stream(void)
 {
     s_adc_stream_enabled = 0U;
+    s_adc_stream_pending_count = 0U;
+    s_adc_stream_pending_tick = 0U;
 }
 
 /**
@@ -1111,7 +1203,7 @@ static void adc_tcp_server_dispatch_command(struct tcp_pcb *tpcb,
     // ① 心跳命令处理
     if (ADC_PROTO_CMD_HEARTBEAT == cmd)
     {
-        uint8_t status = ADC_PROTO_WRITE_STATUS_OK;
+        uint16_t heartbeat_len;
 
         SEGGER_RTT_WriteString(0, "proto heartbeat\r\n");
         app_log_record(APP_LOG_EVENT_PROTO_HEARTBEAT,
@@ -1119,12 +1211,13 @@ static void adc_tcp_server_dispatch_command(struct tcp_pcb *tpcb,
                        0U,
                        0U);
 
-        // 回复心跳
+        heartbeat_len = adc_tcp_server_build_heartbeat_payload();
+
         (void)adc_tcp_server_send_command_frame(tpcb,
                                                 ADC_PROTO_CMD_HEARTBEAT,
                                                 0U,
-                                                &status,
-                                                sizeof(status));
+                                                s_heartbeat_payload,
+                                                heartbeat_len);
     }
     // ② 写入参数命令处理
     else if (ADC_PROTO_CMD_WRITE_PARAM == cmd)
@@ -1165,6 +1258,7 @@ static void adc_tcp_server_handle_log_clear(struct tcp_pcb *tpcb,
         (ADC_LOG_DIAG_ACTION_CLEAR == payload[2]))
     {
         app_log_clear();
+        app_log_persist_clear();
         app_log_record(APP_LOG_EVENT_LOG_CLEARED,
                        0U,
                        0U,
@@ -1368,7 +1462,7 @@ static void adc_tcp_server_handle_read_param(struct tcp_pcb *tpcb,
                    0U);
 
     // ① 验证负载长度（应该是 2 字节的 block_id）
-    if (2U != payload_len)
+    if (payload_len < 2U)
     {
         SEGGER_RTT_WriteString(0, "read param bad len\r\n");
         (void)adc_tcp_server_send_read_status(tpcb,
@@ -1402,12 +1496,25 @@ static void adc_tcp_server_handle_read_param(struct tcp_pcb *tpcb,
     if (ADC_PARAM_BLOCK_LOG_SNAPSHOT == block_id)
     {
         uint16_t log_len;
+        uint8_t action;
 
-        // 构建日志快照数据
-        log_len = adc_diag_payload_build_log_snapshot(s_diag_payload,
-                                                      sizeof(s_diag_payload));
+        action = ADC_LOG_DIAG_ACTION_READ_RAM;
+        if (payload_len >= 3U)
+        {
+            action = payload[2];
+        }
 
-        // 发送日志快照
+        if (ADC_LOG_DIAG_ACTION_READ_PERSIST == action)
+        {
+            log_len = adc_diag_payload_build_persist_log_snapshot(s_diag_payload,
+                                                                  sizeof(s_diag_payload));
+        }
+        else
+        {
+            log_len = adc_diag_payload_build_log_snapshot(s_diag_payload,
+                                                          sizeof(s_diag_payload));
+        }
+
         (void)adc_tcp_server_send_command_frame(tpcb,
                                                 ADC_PROTO_CMD_READ_PARAM,
                                                 block_id,
@@ -1552,23 +1659,26 @@ static uint8_t adc_tcp_server_can_send_bytes(uint16_t need_len)
  *       - 读取最新的 ADC 采样
  *       - 应用到 DAC 输出服务（如果 DAC 通道配置为级联模式）
  */
-static uint16_t adc_tcp_server_collect_stream_samples(uint16_t max_sample_count)
+static uint16_t adc_tcp_server_collect_stream_samples(uint16_t sample_offset,
+                                                      uint16_t max_sample_count)
 {
-    uint16_t sample_count = 0U;
+    uint16_t sample_count = sample_offset;
 
     while (sample_count < max_sample_count)
     {
-        // ① 尝试读取一个采样
+        /*
+         * Append new ADC samples after the samples already staged in
+         * s_adc_stream_samples[]. This lets us fill one fixed-size stream
+         * payload across several main-loop iterations.
+         */
         if (0U == adc_acq_service_get_sample(&s_adc_stream_samples[sample_count]))
         {
-            break; // 无可用采样
+            break;
         }
 
         /*
-         * ② ADC-to-DAC 级联：立即将采样应用到 DAC 输出
-         * DAC 服务会判断每个通道是否在级联模式
-         * - 如果在级联模式：输出该 ADC 通道的值
-         * - 如果在手动模式：保持手动设置的输出值
+         * If DAC cascade is enabled while TCP stream is running, use the same
+         * raw ADC sample before it is packed into the network payload.
          */
         dac_output_service_apply_adc_sample(&s_adc_stream_samples[sample_count]);
 
@@ -1669,16 +1779,37 @@ static void adc_tcp_server_pump_adc_stream(void)
             return; // 缓冲区满，停止发送
         }
 
-        // ⑤ 收集采样数据
-        sample_count = adc_tcp_server_collect_stream_samples(max_sample_count);
-
-        if (0U == sample_count)
+        if (0U == s_adc_stream_pending_count)
         {
-            return; // 无采样，停止发送
+            s_adc_stream_pending_tick = HAL_GetTick();
         }
 
-        // ⑥ 构建数据流负载
-        payload_len = adc_tcp_server_build_stream_payload(sample_count);
+        // ⑤ 收集采样数据
+        sample_count = adc_tcp_server_collect_stream_samples(s_adc_stream_pending_count,
+                                                             max_sample_count);
+
+        s_adc_stream_pending_count = sample_count;
+
+        if (0U == s_adc_stream_pending_count)
+        {
+            return;
+        }
+
+        /*
+         * Send immediately when one fixed payload is full.
+         * If it is not full, wait only a short time. This avoids both extremes:
+         *   1. sending too many mostly-empty padded frames;
+         *   2. waiting forever at low sample rates.
+         */
+        if (s_adc_stream_pending_count < max_sample_count)
+        {
+            if ((HAL_GetTick() - s_adc_stream_pending_tick) < ADC_STREAM_MAX_ASSEMBLE_MS)
+            {
+                return;
+            }
+        }
+
+        payload_len = adc_tcp_server_build_stream_payload(s_adc_stream_pending_count);
 
         if (0U == payload_len)
         {
@@ -1707,6 +1838,8 @@ static void adc_tcp_server_pump_adc_stream(void)
         }
 
         // ⑨ 更新流序列号
-        s_adc_stream_seq += sample_count;
+        s_adc_stream_seq += s_adc_stream_pending_count;
+        s_adc_stream_pending_count = 0U;
+        s_adc_stream_pending_tick = HAL_GetTick();
     }
 }

@@ -20,7 +20,9 @@
 #define ADC_PROTO_RSP_DEBUG_STATUS 0x83U
 
 /** @brief 日志诊断命令 */
-#define ADC_LOG_DIAG_ACTION_CLEAR 0x01U              // 清空日志
+#define ADC_LOG_DIAG_ACTION_READ_RAM 0x00U           // 读取 RAM 日志快照
+#define ADC_LOG_DIAG_ACTION_CLEAR 0x01U              // 清空 RAM 日志
+#define ADC_LOG_DIAG_ACTION_READ_PERSIST 0x02U       // 读取 EEPROM 持久日志快照
 #define ADC_LOG_DIAG_ACTION_STOP_WATCHDOG_FEED 0xA5U // 停止看门狗喂狗（调试用）
 
 /** @brief ADC 数据流类型定义 */

@@ -65,6 +65,29 @@ void dac_output_service_process(void)
     memcpy(&s_last_cal_config, dac_cal, sizeof(s_last_cal_config));
 }
 
+uint8_t dac_output_service_is_adc_cascade_enabled(void)
+{
+    return dac_output_service_has_adc_cascade(device_config_get_dac_output());
+}
+
+uint8_t dac_output_service_is_manual_enabled(void)
+{
+    const device_dac_output_config_t *dac_output;
+    uint8_t ch;
+
+    dac_output = device_config_get_dac_output();
+
+    for (ch = 0U; ch < DEVICE_CONFIG_DAC_CHANNEL_COUNT; ch++)
+    {
+        if (DEVICE_CONFIG_DAC_MODE_MANUAL == dac_output->ch[ch].mode)
+        {
+            return 1U;
+        }
+    }
+
+    return 0U;
+}
+
 void dac_output_service_process_adc_cascade(void)
 {
     const device_dac_output_config_t *dac_output;

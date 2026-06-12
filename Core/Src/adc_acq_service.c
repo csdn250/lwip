@@ -1,4 +1,5 @@
 #include "adc_acq_service.h"
+#include "adc_status_service.h"
 #include "adc.h"
 #include "tim.h"
 
@@ -266,7 +267,7 @@ void adc_acq_service_init(void)
     s_no_block_count = 0U;
 
     // ⑥ 初始化读取状态
-    s_next_read_block = ADC_ACQ_BLOCK_HALF;  // 优先从前半开始
+    s_next_read_block = ADC_ACQ_BLOCK_HALF; // 优先从前半开始
     s_read_block = ADC_ACQ_BLOCK_HALF;
     s_read_group_index = 0U;
     s_block_ready = 0U;
@@ -390,6 +391,12 @@ uint8_t adc_acq_service_get_sample(adc_acq_sample_t *sample)
     sample->raw[9] = s_adc3_dma_buf[adc3_base + 4U];
     sample->raw[10] = s_adc3_dma_buf[adc3_base + 5U];
     sample->raw[11] = s_adc3_dma_buf[adc3_base + 6U];
+
+    /*
+     * 这组 12 路 ADC 数据已经完整取出。
+     * 状态服务只做统计缓存，后续心跳可以直接读取最近一次平均值。
+     */
+    adc_status_service_update_sample(sample);
 
     // ⑨ 更新序列号和读取索引
     s_sample_seq++;
@@ -549,7 +556,7 @@ static uint8_t adc_acq_service_try_lock_block(uint8_t block)
             (0U == s_adc2_half_ready) ||
             (0U == s_adc3_half_ready))
         {
-            return 0U;  // 至少一个 ADC 未就绪，无法锁定
+            return 0U; // 至少一个 ADC 未就绪，无法锁定
         }
 
         // ② 清除就绪标志（表示已锁定）
@@ -569,7 +576,7 @@ static uint8_t adc_acq_service_try_lock_block(uint8_t block)
             (0U == s_adc2_full_ready) ||
             (0U == s_adc3_full_ready))
         {
-            return 0U;  // 至少一个 ADC 未就绪，无法锁定
+            return 0U; // 至少一个 ADC 未就绪，无法锁定
         }
 
         // ② 清除就绪标志（表示已锁定）
@@ -586,7 +593,7 @@ static uint8_t adc_acq_service_try_lock_block(uint8_t block)
     s_read_group_index = 0U;
     s_block_ready = 1U;
 
-    return 1U;  // 锁定成功
+    return 1U; // 锁定成功
 }
 
 /**
@@ -612,7 +619,7 @@ static uint8_t adc_acq_service_lock_next_block(void)
     // ① 优先尝试 s_next_read_block
     if (0U != adc_acq_service_try_lock_block(s_next_read_block))
     {
-        return 1U;  // 优先块就绪，锁定成功
+        return 1U; // 优先块就绪，锁定成功
     }
 
     // ② 计算备用块（与优先块相反）

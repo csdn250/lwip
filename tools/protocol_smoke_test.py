@@ -39,6 +39,8 @@ FIXED_DATA_OFFSET = 5
 FIXED_BLOCK_ID_SIZE = 2
 FIXED_DATA_CAPACITY = FIXED_CRC_OFFSET - FIXED_DATA_OFFSET - FIXED_BLOCK_ID_SIZE
 
+HEARTBEAT_STATUS_LEN = 69
+
 DEFAULT_DA1_VOLTAGE = 2.5
 DEFAULT_EXPECTED_DA1_CODE = 2048
 
@@ -136,6 +138,29 @@ def make_da_cascade_data(adc_channel: int, k: float, b: float) -> bytes:
     return struct.pack(">BBff", mode_cascade, adc_channel, k, b)
 
 
+def parse_heartbeat_status(data: bytes):
+    if len(data) != HEARTBEAT_STATUS_LEN:
+        raise AssertionError(f"heartbeat length mismatch: {len(data)}")
+
+    offset = 0
+    status = data[offset]
+    offset += 1
+    alarm_flags = int.from_bytes(data[offset : offset + 4], "big")
+    offset += 4
+    state_flags = int.from_bytes(data[offset : offset + 4], "big")
+    offset += 4
+    avg_sample_count = int.from_bytes(data[offset : offset + 4], "big")
+    offset += 4
+
+    adc_avg = []
+    for _ in range(12):
+        adc_avg.append(struct.unpack(">f", data[offset : offset + 4])[0])
+        offset += 4
+
+    dac_codes = struct.unpack(">HHHH", data[offset : offset + 8])
+    return status, alarm_flags, state_flags, avg_sample_count, adc_avg, dac_codes
+
+
 def run_smoke_test(host: str, port: int, bind: str | None) -> None:
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(3.0)
@@ -149,9 +174,16 @@ def run_smoke_test(host: str, port: int, bind: str | None) -> None:
 
         cmd, block, data = request(sock, CMD_HEARTBEAT, 0x0000)
         expect_reply(cmd, block, CMD_HEARTBEAT, 0x0000)
-        if data != bytes([WRITE_STATUS_OK]):
-            raise AssertionError(f"heartbeat status is not OK: {data.hex(' ')}")
-        print("ok heartbeat")
+        status, alarm_flags, state_flags, avg_count, adc_avg, dac_codes = parse_heartbeat_status(data)
+        if status != WRITE_STATUS_OK:
+            raise AssertionError(f"heartbeat status is not OK: 0x{status:02X}")
+        if 0 == avg_count:
+            raise AssertionError("heartbeat ADC average is not ready")
+        print(
+            "ok heartbeat: "
+            f"alarm=0x{alarm_flags:08X}, state=0x{state_flags:08X}, "
+            f"avg_count={avg_count}, first_adc={adc_avg[0]:.3f}, dac_codes={dac_codes}"
+        )
 
         cmd, block, data = request(sock, CMD_READ_PARAM, BLOCK_MAC)
         expect_reply(cmd, block, CMD_READ_PARAM, BLOCK_MAC)

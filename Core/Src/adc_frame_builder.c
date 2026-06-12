@@ -75,10 +75,18 @@ uint16_t adc_frame_builder_build_raw_u16_batch(const adc_acq_sample_t *samples,
 
     payload_bytes = (uint16_t)(sample_count * channel_count * sizeof(uint16_t));
 
-    if (out_buf_size < (ADC_FRAME_HEADER_BYTES + payload_bytes))
+    if ((payload_bytes > ADC_FRAME_MAX_RAW_PAYLOAD_BYTES) ||
+        (out_buf_size < ADC_FRAME_MAX_BYTES))
     {
         return 0U;
     }
+
+    /*
+     * The ADC stream payload sent to the PC is fixed-size. payload_bytes in
+     * the inner ADC header still tells the PC how many bytes are real samples;
+     * the remaining bytes are zero padding.
+     */
+    memset(out_buf, 0, ADC_FRAME_MAX_BYTES);
 
     offset = 0U;
     adc_frame_builder_put_u32_be(out_buf, &offset, ADC_FRAME_MAGIC);
@@ -102,7 +110,8 @@ uint16_t adc_frame_builder_build_raw_u16_batch(const adc_acq_sample_t *samples,
         }
     }
 
-    return offset;
+    (void)offset;
+    return ADC_FRAME_MAX_BYTES;
 }
 
 uint16_t adc_frame_builder_build_cal_float_batch(const adc_acq_sample_t *samples,
@@ -138,10 +147,17 @@ uint16_t adc_frame_builder_build_cal_float_batch(const adc_acq_sample_t *samples
 
     payload_bytes = (uint16_t)(sample_count * channel_count * sizeof(float));
 
-    if (out_buf_size < (ADC_FRAME_HEADER_BYTES + payload_bytes))
+    if ((payload_bytes > ADC_FRAME_MAX_CONVERTED_PAYLOAD_BYTES) ||
+        (out_buf_size < ADC_FRAME_MAX_BYTES))
     {
         return 0U;
     }
+
+    /*
+     * Keep stream payload length fixed while preserving the real valid data
+     * length in the inner ADC header's payload_bytes field.
+     */
+    memset(out_buf, 0, ADC_FRAME_MAX_BYTES);
 
     offset = 0U;
     adc_frame_builder_put_u32_be(out_buf, &offset, ADC_FRAME_MAGIC);
@@ -172,5 +188,6 @@ uint16_t adc_frame_builder_build_cal_float_batch(const adc_acq_sample_t *samples
         }
     }
 
-    return offset;
+    (void)offset;
+    return ADC_FRAME_MAX_BYTES;
 }

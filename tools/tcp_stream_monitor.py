@@ -251,6 +251,8 @@ def main():
     expected_seq = None
     last_values = []
     last_group_count = 0
+    last_outer_payload_len = 0
+    last_valid_payload_len = 0
     channel_count = 0
     last_debug = None
 
@@ -339,6 +341,8 @@ def main():
                     interval_sample_groups += group_count
                     channel_count = info["channel_count"]
                     last_group_count = group_count
+                    last_outer_payload_len = len(payload)
+                    last_valid_payload_len = info["payload_bytes"]
                     last_values = info["values"][: min(4, len(info["values"]))]
 
             now = time.monotonic()
@@ -370,6 +374,8 @@ def main():
                     f"net={format_rate(interval_bytes, dt)}, "
                     f"gap={gap_samples}, overlap={overlap_samples}, bad={bad_frames}, "
                     f"group={last_group_count}, "
+                    f"outer_payload={last_outer_payload_len}, "
+                    f"valid_payload={last_valid_payload_len}, "
                     f"last_seq={last_seq}, first_values={last_values}"
                     f"{debug_text}"
                 )

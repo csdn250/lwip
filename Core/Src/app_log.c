@@ -2,6 +2,7 @@
 #define LOG_LVL ELOG_LVL_INFO
 
 #include "app_log.h"
+#include "app_log_persist.h"
 #include "SEGGER_RTT.h"
 #include "elog.h"
 #include <string.h>
@@ -10,10 +11,13 @@ static app_log_record_t s_log_records[APP_LOG_RECORD_CAPACITY];
 static uint16_t s_log_write_index;
 static uint16_t s_log_count;
 
+static uint8_t app_log_is_persist_event(app_log_event_t event);
+
 void app_log_init(void)
 {
     SEGGER_RTT_Init();
     app_log_clear();
+    app_log_persist_init();
 
     elog_init();
     elog_set_fmt(ELOG_LVL_ASSERT, ELOG_FMT_ALL);
@@ -63,6 +67,11 @@ void app_log_record(app_log_event_t event,
     {
         s_log_count++;
     }
+
+    if (0U != app_log_is_persist_event(event))
+    {
+        app_log_persist_request_save();
+    }
 }
 
 uint16_t app_log_snapshot(app_log_record_t *out,
@@ -101,4 +110,24 @@ void app_log_clear(void)
     memset(s_log_records, 0, sizeof(s_log_records));
     s_log_write_index = 0U;
     s_log_count = 0U;
+}
+
+static uint8_t app_log_is_persist_event(app_log_event_t event)
+{
+    switch (event)
+    {
+    case APP_LOG_EVENT_I2C_EEPROM_ERROR:
+    case APP_LOG_EVENT_TCP_ERROR:
+    case APP_LOG_EVENT_TCP_RX_OVERFLOW:
+    case APP_LOG_EVENT_TCP_BAD_FRAME:
+    case APP_LOG_EVENT_CONFIG_SAVE_FAILED:
+    case APP_LOG_EVENT_TCP_IDLE_TIMEOUT:
+    case APP_LOG_EVENT_RESET_CAUSE:
+    case APP_LOG_EVENT_WATCHDOG_TEST:
+    case APP_LOG_EVENT_ERROR_HANDLER:
+        return 1U;
+
+    default:
+        return 0U;
+    }
 }

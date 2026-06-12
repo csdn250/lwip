@@ -8,9 +8,27 @@
 #define ADC_FRAME_MAGIC 0x41444331U
 #define ADC_FRAME_MAX_CHANNEL_COUNT ADC_ACQ_CHANNEL_COUNT
 
-/* One TCP data payload can contain several 12-channel sample groups. */
-#define ADC_FRAME_BATCH_GROUP_COUNT 32U
-#define ADC_FRAME_CONVERTED_BATCH_GROUP_COUNT 16U
+/*
+ * ADC stream payload length inside the outer TCP protocol frame.
+ *
+ * Outer frame:
+ *   12 34 CMD LEN [1406-byte ADC payload] CRC32 56 78
+ *
+ * TCP is still a byte stream. This fixed length only makes each ADC protocol
+ * payload stable for the PC parser after it has already found a complete frame.
+ */
+#define ADC_FRAME_STREAM_PAYLOAD_BYTES 1406U
+
+#define ADC_FRAME_HEADER_BYTES ((uint16_t)sizeof(adc_frame_header_t))
+#define ADC_FRAME_SAMPLE_CAPACITY_BYTES \
+    (ADC_FRAME_STREAM_PAYLOAD_BYTES - ADC_FRAME_HEADER_BYTES)
+
+/* Max complete 12-channel sample groups that fit in one fixed ADC payload. */
+#define ADC_FRAME_BATCH_GROUP_COUNT \
+    (ADC_FRAME_SAMPLE_CAPACITY_BYTES / (ADC_FRAME_MAX_CHANNEL_COUNT * sizeof(uint16_t)))
+
+#define ADC_FRAME_CONVERTED_BATCH_GROUP_COUNT \
+    (ADC_FRAME_SAMPLE_CAPACITY_BYTES / (ADC_FRAME_MAX_CHANNEL_COUNT * sizeof(float)))
 
 #define ADC_FRAME_MAX_RAW_PAYLOAD_BYTES \
     (ADC_FRAME_BATCH_GROUP_COUNT * ADC_FRAME_MAX_CHANNEL_COUNT * sizeof(uint16_t))
@@ -18,10 +36,8 @@
 #define ADC_FRAME_MAX_CONVERTED_PAYLOAD_BYTES \
     (ADC_FRAME_CONVERTED_BATCH_GROUP_COUNT * ADC_FRAME_MAX_CHANNEL_COUNT * sizeof(float))
 
-#define ADC_FRAME_MAX_PAYLOAD_BYTES ADC_FRAME_MAX_RAW_PAYLOAD_BYTES
-
-#define ADC_FRAME_HEADER_BYTES ((uint16_t)sizeof(adc_frame_header_t))
-#define ADC_FRAME_MAX_BYTES (ADC_FRAME_HEADER_BYTES + ADC_FRAME_MAX_PAYLOAD_BYTES)
+#define ADC_FRAME_MAX_PAYLOAD_BYTES ADC_FRAME_SAMPLE_CAPACITY_BYTES
+#define ADC_FRAME_MAX_BYTES ADC_FRAME_STREAM_PAYLOAD_BYTES
 
 typedef enum
 {

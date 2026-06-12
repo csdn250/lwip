@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Read and decode the ADDA RAM log snapshot block."""
+"""Read and decode the ADDA log snapshot block."""
 
 import argparse
 import socket
@@ -11,6 +11,9 @@ EOF = b"\x56\x78"
 
 CMD_READ_PARAM = 0x02
 BLOCK_LOG_SNAPSHOT = 0x000D
+
+LOG_ACTION_READ_RAM = 0x00
+LOG_ACTION_READ_PERSIST = 0x02
 
 FIXED_FRAME_LEN = 150
 FIXED_CRC_OFFSET = 144
@@ -49,6 +52,19 @@ EVENT_NAMES = {
     26: "LOG_CLEARED",
     27: "RESET_CAUSE",
     28: "WATCHDOG_TEST",
+    29: "CONFIG_LOADED",
+    30: "CONFIG_DEFAULT",
+    31: "ADC_INIT_FAILED",
+    32: "ADC_START_FAILED",
+    33: "SYSTEM_READY",
+    34: "TCP_STREAM_STOPPED",
+    35: "TCP_STREAM_STARTED",
+    36: "IWDG_REFRESH_FAILED",
+    37: "NETIF_FAILED",
+    38: "ERROR_HANDLER",
+    39: "CONFIG_SAVED",
+    40: "CONFIG_SAVE_FAILED",
+    41: "TCP_IDLE_TIMEOUT",
 }
 
 
@@ -143,13 +159,23 @@ def parse_log_snapshot(data: bytes):
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Read ADDA RAM log snapshot")
+    parser = argparse.ArgumentParser(description="Read ADDA log snapshot")
     parser.add_argument("--host", default="192.168.1.21", help="device IP")
     parser.add_argument("--port", type=int, default=8080, help="device TCP port")
     parser.add_argument("--bind", default=None, help="optional local source IP")
+    parser.add_argument(
+        "--source",
+        choices=("ram", "persist"),
+        default="ram",
+        help="log source: RAM snapshot or EEPROM persistent snapshot",
+    )
     args = parser.parse_args()
 
-    request = build_fixed_frame(CMD_READ_PARAM, BLOCK_LOG_SNAPSHOT)
+    action = LOG_ACTION_READ_RAM
+    if args.source == "persist":
+        action = LOG_ACTION_READ_PERSIST
+
+    request = build_fixed_frame(CMD_READ_PARAM, BLOCK_LOG_SNAPSHOT, bytes([action]))
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.settimeout(3.0)
@@ -172,7 +198,10 @@ def main() -> int:
         raise ValueError("reply is not a log snapshot")
 
     version, record_size, records = parse_log_snapshot(data)
-    print(f"log snapshot: version={version}, record_size={record_size}, count={len(records)}")
+    print(
+        f"log snapshot: source={args.source}, "
+        f"version={version}, record_size={record_size}, count={len(records)}"
+    )
     print("idx | tick_ms | event | name                 | arg0 | arg1       | arg2")
     print("----+---------+-------+----------------------+------+------------+------------")
 
