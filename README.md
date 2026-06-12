@@ -2,37 +2,57 @@
 
 STM32H743 + lwIP based AD/DA data collection firmware.
 
-## DAC Manual Voltage Update
+## DAC Output And Calibration
 
-2026-06-09 update:
+2026-06-12 update:
 
-- DA parameter blocks `0x0009`~`0x000C` now use `manual_voltage` as `float32_be`.
-- DA block wire format is still 14 bytes:
+- DA output control blocks `0x0009`~`0x000C` now describe current output state only.
+- Manual output writes only `mode + manual_voltage`.
+- ADC cascade output writes `mode + adc_channel + cascade_k + cascade_b`.
+- DAC calibration is separated into block `0x0010` and saved to EEPROM.
+
+Manual output block format:
 
 ```text
-mode             1 byte
+mode             1 byte, 0 = manual
 manual_voltage   4 bytes, float32_be
-adc_channel      1 byte
-k                4 bytes, float32_be
-b                4 bytes, float32_be
 ```
 
-- Manual DAC output formula:
+ADC cascade output block format:
 
 ```text
-dac_code = round(manual_voltage * k + b)
-dac_code is clamped to 0..4095
+mode             1 byte, 1 = ADC cascade
+adc_channel      1 byte, ADC logical channel 0..11
+cascade_k        4 bytes, float32_be
+cascade_b        4 bytes, float32_be
 ```
 
-- Default DAC calibration currently assumes `0V..5V -> 0..4095`:
+DAC calibration block `0x0010` format:
 
 ```text
-k = 819.0
-b = 0.0
-effective k = 819.0 code/V
+DA1 k            4 bytes, float32_be
+DA1 b            4 bytes, float32_be
+...
+DA4 k            4 bytes, float32_be
+DA4 b            4 bytes, float32_be
 ```
 
-- Dynamic read-only block `0x000E` returns the latest DAC output code snapshot:
+Manual DAC output formula:
+
+```text
+dac_code = round(manual_voltage * dac_cal.k + dac_cal.b)
+dac_code = limit(dac_code, 0, 4095)
+```
+
+ADC cascade formula:
+
+```text
+adc_value = adc_raw * adc_cal.k + adc_cal.b
+dac_code  = round(adc_value * cascade_k + cascade_b)
+dac_code  = limit(dac_code, 0, 4095)
+```
+
+Dynamic read-only block `0x000E` returns the latest DAC output code snapshot:
 
 ```text
 DA1_code uint16_be
@@ -45,7 +65,7 @@ Verified example:
 
 ```text
 Write DA1 block 0x0009:
-mode=0, manual_voltage=2.5f, adc_channel=0xFF, k=819.0f, b=0.0f
+mode=0, manual_voltage=2.5f
 
 Read DAC status block 0x000E:
 DA1_code = 0x0800 = 2048
@@ -176,11 +196,14 @@ BLOCK_ID_H BLOCK_ID_L
 | `0x000D` | RAM 日志快照，只读；写入 `01` 可清空 RAM 日志 |
 | `0x000E` | DAC 输出码快照，只读 |
 | `0x000F` | 设备名，可读可写；写入后随 UDP 广播；最长 31 字符，自动补 `\0` |
+| `0x0010` | DAC 标定参数，4 通道，每通道 `k` + `b`，均为 `float32_be` |
 
-> 保存行为：写入需落 EEPROM 的参数块（标定 / DAC / 网络 / 设备名）时，设备
+> 保存行为：写入需落 EEPROM 的参数块（ADC 标定 / DAC 标定 / 网络 / 设备名）时，设备
 > 不在 TCP 回调里同步写 EEPROM（阻塞式 I2C 最坏数百毫秒），而是置脏标记后
 > 由主循环空闲点统一写入。因此这些写命令的响应状态为 `0x01`（SAVE_PENDING，
 > 表示"已接受，稍后保存"），随后会真正落盘；上位机可读回参数确认结果。
+> DA 输出控制块 `0x0009`~`0x000C` 是运行状态控制，不写 EEPROM，响应状态为
+> `0x00`。
 
 ### ADC 标定参数
 
@@ -218,31 +241,65 @@ enable stream_type
 00 82   停止 converted ADC 数据上传
 ```
 
-### DA 通道配置
+### DA 通道输出控制
 
-`0x0009` - `0x000C` 每个 DA 通道参数块长度为 14 字节：
+`0x0009` - `0x000C` 分别控制 DA1 - DA4。block id 决定目标 DAC 通道，
+payload 决定该 DAC 通道的输出模式。
+
+手动输出数据区长度为 5 字节：
 
 ```text
-mode             1 byte
+mode             1 byte, 0 = manual
 manual_voltage   4 bytes, float32_be
-adc_channel      1 byte
-k                4 bytes, float32_be
-b                4 bytes, float32_be
 ```
 
-字段含义：
+级联输出数据区长度为 10 字节：
 
-- `mode = 0`: 手动输出，上位机下发 `manual_voltage`
-- `mode = 1`: ADC 级联输出，选择 `adc_channel`
-- `manual_voltage`: 手动模式下的目标输出电压，`float32_be`
-- `adc_channel`: 级联模式下选择 ADC 逻辑通道 `0..11`
-- `k / b`: DAC 标定参数，均为 `float32_be`，用于把电压换算成 DAC 整数码值
+```text
+mode             1 byte, 1 = ADC cascade
+adc_channel      1 byte, ADC logical channel 0..11
+cascade_k        4 bytes, float32_be
+cascade_b        4 bytes, float32_be
+```
 
 手动 DAC 计算：
 
 ```text
-dac_code = round(manual_voltage * k + b)
+dac_code = round(manual_voltage * dac_cal.k + dac_cal.b)
 dac_code = limit(dac_code, 0, 4095)
+```
+
+ADC 到 DAC 级联计算：
+
+```text
+adc_value = adc_raw * adc_cal.k + adc_cal.b
+dac_code  = round(adc_value * cascade_k + cascade_b)
+dac_code  = limit(dac_code, 0, 4095)
+```
+
+示例：
+
+```text
+0x0009 + mode=1 + adc_channel=0  -> AD0 controls DA1
+0x000A + mode=1 + adc_channel=3  -> AD3 controls DA2
+```
+
+### DAC 标定参数
+
+`0x0010` 数据区长度为 32 字节：
+
+```text
+DA1 k float32_be
+DA1 b float32_be
+...
+DA4 k float32_be
+DA4 b float32_be
+```
+
+手动输出使用 EEPROM 中保存的 DAC 标定参数：
+
+```text
+dac_code = round(manual_voltage * k + b)
 ```
 
 默认 DAC 标定按 `0V..5V -> 0..4095`：
@@ -251,14 +308,6 @@ dac_code = limit(dac_code, 0, 4095)
 k = 819.0
 b = 0.0
 effective k = 819.0 code/V
-```
-
-ADC 到 DAC 级联计算：
-
-```text
-adc_value = adc_raw * adc_k + adc_b
-dac_code  = round(adc_value * dac_k + dac_b)
-dac_code  = limit(dac_code, 0, 4095)
 ```
 
 ### RAM 日志快照

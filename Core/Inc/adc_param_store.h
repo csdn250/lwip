@@ -27,6 +27,7 @@
 #define ADC_PARAM_BLOCK_LOG_SNAPSHOT 0x000DU
 #define ADC_PARAM_BLOCK_DAC_STATUS 0x000EU
 #define ADC_PARAM_BLOCK_DEVICE_NAME 0x000FU
+#define ADC_PARAM_BLOCK_DAC_CAL 0x0010U
 
 typedef struct
 {
@@ -54,7 +55,10 @@ uint8_t adc_param_store_apply_cal_param(const uint8_t *data,
 uint8_t adc_param_store_apply_dac_param(uint16_t block_id,
                                         const uint8_t *data,
                                         uint16_t len);
-                                        
+
+uint8_t adc_param_store_apply_dac_cal_param(const uint8_t *data,
+                                            uint16_t len);
+
 uint8_t adc_param_store_apply_network_param(uint16_t block_id,
                                             const uint8_t *data,
                                             uint16_t len);

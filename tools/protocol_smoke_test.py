@@ -29,6 +29,9 @@ BLOCK_DAC_STATUS = 0x000E
 WRITE_STATUS_OK = 0x00
 WRITE_STATUS_SAVE_PENDING = 0x01
 
+BLOCK_DAC_CAL = 0x0010
+
+
 FIXED_FRAME_LEN = 150
 FIXED_CRC_OFFSET = 144
 FIXED_EOF_OFFSET = 148
@@ -37,9 +40,14 @@ FIXED_BLOCK_ID_SIZE = 2
 FIXED_DATA_CAPACITY = FIXED_CRC_OFFSET - FIXED_DATA_OFFSET - FIXED_BLOCK_ID_SIZE
 
 DEFAULT_DA1_VOLTAGE = 2.5
-DEFAULT_DAC_K = 819.0
-DEFAULT_DAC_B = 0.0
 DEFAULT_EXPECTED_DA1_CODE = 2048
+
+CASCADE_ADC_CHANNEL = 0
+CASCADE_K = 100.0
+CASCADE_B = 0.0
+
+UPDATED_DAC_K = 409.5
+UPDATED_EXPECTED_DA1_CODE = 1024
 
 
 def crc32(data: bytes) -> int:
@@ -62,6 +70,11 @@ def build_fixed_frame(cmd: int, block_id: int, data: bytes = b"") -> bytes:
     frame[FIXED_EOF_OFFSET : FIXED_EOF_OFFSET + 2] = EOF
     return bytes(frame)
 
+def make_dac_cal_data(k: float = 819.0, b: float = 0.0) -> bytes:
+    payload = bytearray()
+    for _ in range(4):
+        payload.extend(struct.pack(">ff", k, b))
+    return bytes(payload)
 
 def recv_exact(sock: socket.socket, size: int) -> bytes:
     data = bytearray()
@@ -114,10 +127,13 @@ def expect_reply(actual_cmd: int, actual_block: int, expected_cmd: int, expected
         )
 
 
-def make_da_manual_data(voltage: float, k: float, b: float) -> bytes:
+def make_da_manual_data(voltage: float) -> bytes:
     mode_manual = 0
-    adc_channel_unused = 0xFF
-    return struct.pack(">BfBff", mode_manual, voltage, adc_channel_unused, k, b)
+    return struct.pack(">Bf", mode_manual, voltage)
+
+def make_da_cascade_data(adc_channel: int, k: float, b: float) -> bytes:
+    mode_cascade = 1
+    return struct.pack(">BBff", mode_cascade, adc_channel, k, b)
 
 
 def run_smoke_test(host: str, port: int, bind: str | None) -> None:
@@ -143,11 +159,12 @@ def run_smoke_test(host: str, port: int, bind: str | None) -> None:
             raise AssertionError(f"MAC block length mismatch: {len(data)}")
         print(f"ok read MAC: {data.hex(':')}")
 
-        da_data = make_da_manual_data(DEFAULT_DA1_VOLTAGE, DEFAULT_DAC_K, DEFAULT_DAC_B)
+        da_data = make_da_manual_data(DEFAULT_DA1_VOLTAGE)
         cmd, block, data = request(sock, CMD_WRITE_PARAM, BLOCK_DA1, da_data)
         expect_reply(cmd, block, CMD_WRITE_PARAM, BLOCK_DA1)
-        if data not in (bytes([WRITE_STATUS_OK]), bytes([WRITE_STATUS_SAVE_PENDING])):
-            raise AssertionError(f"DA1 write status is not accepted: {data.hex(' ')}")
+        if data != bytes([WRITE_STATUS_OK]):
+            raise AssertionError(f"DA1 write status is not OK: {data.hex(' ')}")
+
         print(f"ok write DA1 manual voltage: status=0x{data[0]:02X}")
 
         time.sleep(0.1)
@@ -167,6 +184,71 @@ def run_smoke_test(host: str, port: int, bind: str | None) -> None:
         if codes[0] != DEFAULT_EXPECTED_DA1_CODE:
             raise AssertionError(f"DA1 code mismatch: {codes[0]} != {DEFAULT_EXPECTED_DA1_CODE}")
         print(f"ok DAC status: DA codes={codes}")
+
+        updated_cal_data = make_dac_cal_data(UPDATED_DAC_K, 0.0)
+        cmd, block, data = request(sock, CMD_WRITE_PARAM, BLOCK_DAC_CAL, updated_cal_data)
+        expect_reply(cmd, block, CMD_WRITE_PARAM, BLOCK_DAC_CAL)
+        if data != bytes([WRITE_STATUS_SAVE_PENDING]):
+            raise AssertionError(f"DAC cal update status is not SAVE_PENDING: {data.hex(' ')}")
+        print("ok update DAC calibration")
+
+        time.sleep(0.2)
+
+        cmd, block, data = request(sock, CMD_READ_PARAM, BLOCK_DAC_STATUS)
+        expect_reply(cmd, block, CMD_READ_PARAM, BLOCK_DAC_STATUS)
+        if len(data) != 8:
+            raise AssertionError(f"DAC status length mismatch after cal update: {len(data)}")
+
+        codes = struct.unpack(">HHHH", data)
+        if codes[0] != UPDATED_EXPECTED_DA1_CODE:
+            raise AssertionError(
+                f"DA1 code mismatch after cal update: {codes[0]} != {UPDATED_EXPECTED_DA1_CODE}"
+            )
+        print(f"ok DAC status after cal update: DA codes={codes}")
+
+        default_cal_data = make_dac_cal_data()
+        cmd, block, data = request(sock, CMD_WRITE_PARAM, BLOCK_DAC_CAL, default_cal_data)
+        expect_reply(cmd, block, CMD_WRITE_PARAM, BLOCK_DAC_CAL)
+        if data != bytes([WRITE_STATUS_SAVE_PENDING]):
+            raise AssertionError(f"DAC cal restore status is not SAVE_PENDING: {data.hex(' ')}")
+        print("ok restore DAC calibration")
+
+        dac_cal_data = make_dac_cal_data()
+        cmd, block, data = request(sock, CMD_WRITE_PARAM, BLOCK_DAC_CAL, dac_cal_data)
+        expect_reply(cmd, block, CMD_WRITE_PARAM, BLOCK_DAC_CAL)
+        if data != bytes([WRITE_STATUS_SAVE_PENDING]):
+            raise AssertionError(f"DAC cal write status is not SAVE_PENDING: {data.hex(' ')}")
+        print("ok write DAC calibration")
+
+        time.sleep(0.1)
+
+        cmd, block, data = request(sock, CMD_READ_PARAM, BLOCK_DAC_CAL)
+        expect_reply(cmd, block, CMD_READ_PARAM, BLOCK_DAC_CAL)
+        if data != dac_cal_data:
+            raise AssertionError(f"DAC cal readback mismatch: {data.hex(' ')}")
+        print("ok read DAC calibration")
+
+        cascade_data = make_da_cascade_data(CASCADE_ADC_CHANNEL, CASCADE_K, CASCADE_B)
+        cmd, block, data = request(sock, CMD_WRITE_PARAM, BLOCK_DA1, cascade_data)
+        expect_reply(cmd, block, CMD_WRITE_PARAM, BLOCK_DA1)
+        if data != bytes([WRITE_STATUS_OK]):
+            raise AssertionError(f"DA1 cascade write status is not OK: {data.hex(' ')}")
+        print("ok write DA1 cascade control")
+
+        time.sleep(0.1)
+
+        cmd, block, data = request(sock, CMD_READ_PARAM, BLOCK_DA1)
+        expect_reply(cmd, block, CMD_READ_PARAM, BLOCK_DA1)
+        if data != cascade_data:
+            raise AssertionError(f"DA1 cascade readback mismatch: {data.hex(' ')}")
+        print("ok read DA1 cascade control")
+
+        da_data = make_da_manual_data(DEFAULT_DA1_VOLTAGE)
+        cmd, block, data = request(sock, CMD_WRITE_PARAM, BLOCK_DA1, da_data)
+        expect_reply(cmd, block, CMD_WRITE_PARAM, BLOCK_DA1)
+        if data != bytes([WRITE_STATUS_OK]):
+            raise AssertionError(f"DA1 restore manual status is not OK: {data.hex(' ')}")
+        print("ok restore DA1 manual control")
 
         print("smoke test passed")
     finally:

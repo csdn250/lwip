@@ -35,17 +35,28 @@ typedef struct
 
 typedef struct
 {
-    uint8_t mode;
-    float manual_voltage;
-    uint8_t adc_channel;
     float k;
     float b;
-} device_dac_channel_config_t;
+} device_dac_cal_channel_t;
 
 typedef struct
 {
-    device_dac_channel_config_t ch[DEVICE_CONFIG_DAC_CHANNEL_COUNT];
-} device_dac_config_t;
+    device_dac_cal_channel_t ch[DEVICE_CONFIG_DAC_CHANNEL_COUNT];
+} device_dac_cal_config_t;
+
+typedef struct
+{
+    uint8_t mode;
+    float manual_voltage;
+    uint8_t adc_channel;
+    float cascade_k;
+    float cascade_b;
+} device_dac_output_channel_t;
+
+typedef struct
+{
+    device_dac_output_channel_t ch[DEVICE_CONFIG_DAC_CHANNEL_COUNT];
+} device_dac_output_config_t;
 
 void device_config_init_defaults(void);
 
@@ -75,8 +86,12 @@ const device_adc_cal_config_t *device_config_get_adc_calibration(void);
 
 void device_config_set_adc_calibration(const device_adc_cal_config_t *adc_cal_config);
 
-const device_dac_config_t *device_config_get_dac_config(void);
+const device_dac_output_config_t *device_config_get_dac_output(void);
 
-void device_config_set_dac_config(const device_dac_config_t *dac_config);
+void device_config_set_dac_output(const device_dac_output_config_t *dac_output);
+
+const device_dac_cal_config_t *device_config_get_dac_calibration(void);
+
+void device_config_set_dac_calibration(const device_dac_cal_config_t *dac_cal_config);
 
 #endif /* __DEVICE_CONFIG_H */

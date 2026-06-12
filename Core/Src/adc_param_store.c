@@ -21,10 +21,19 @@
 #define ADC_CAL_PARAM_BYTES (DEVICE_CONFIG_ADC_CHANNEL_COUNT * 2U * sizeof(float))
 
 /**
- * @brief DAC 参数字节数（每个通道）
- * @details mode(1) + voltage(4) + adc_ch(1) + k(4) + b(4) = 14 字节
+ * @brief DAC 标定参数字节数
+ * @details 4 个通道 × 2（k + b） × 4 字节/参数 = 32 字节
  */
-#define DAC_PARAM_BYTES 14U
+#define DAC_CAL_PARAM_BYTES (DEVICE_CONFIG_DAC_CHANNEL_COUNT * 2U * sizeof(float))
+
+/**
+ * @brief DAC 输出控制块最大字节数（每个通道）
+ * @details 手动模式: mode(1) + voltage(4) = 5 字节
+ *          级联模式: mode(1) + adc_ch(1) + cascade_k(4) + cascade_b(4) = 10 字节
+ */
+#define DAC_OUTPUT_PARAM_MAX_BYTES 10U
+#define DAC_OUTPUT_MANUAL_BYTES 5U
+#define DAC_OUTPUT_CASCADE_BYTES 10U
 
 /* ==================== Static Parameter Storage ==================== */
 
@@ -86,22 +95,22 @@ static uint8_t s_param_gateway[8] = {192U, 168U, 1U, 1U, 192U, 168U, 1U, 1U};
  * @brief DAC 通道 1 参数缓冲区
  * @details 存储 DAC CH1 的工作模式、输出电压、校准参数等
  */
-static uint8_t s_param_da_ch1[DAC_PARAM_BYTES];
+static uint8_t s_param_da_ch1[DAC_OUTPUT_PARAM_MAX_BYTES];
 
 /**
  * @brief DAC 通道 2 参数缓冲区
  */
-static uint8_t s_param_da_ch2[DAC_PARAM_BYTES];
+static uint8_t s_param_da_ch2[DAC_OUTPUT_PARAM_MAX_BYTES];
 
 /**
  * @brief DAC 通道 3 参数缓冲区
  */
-static uint8_t s_param_da_ch3[DAC_PARAM_BYTES];
+static uint8_t s_param_da_ch3[DAC_OUTPUT_PARAM_MAX_BYTES];
 
 /**
  * @brief DAC 通道 4 参数缓冲区
  */
-static uint8_t s_param_da_ch4[DAC_PARAM_BYTES];
+static uint8_t s_param_da_ch4[DAC_OUTPUT_PARAM_MAX_BYTES];
 
 /**
  * @brief 设备名参数缓冲区
@@ -109,6 +118,12 @@ static uint8_t s_param_da_ch4[DAC_PARAM_BYTES];
  *          UDP 广播也会发送此名，上位机可通过 0x000F block 读写。
  */
 static uint8_t s_param_name[DEVICE_CONFIG_NAME_MAX_LEN];
+
+/**
+ * @brief DAC 标定参数缓冲区
+ * @details 存储 4 个 DAC 通道的标定参数（k, b）
+ */
+static uint8_t s_param_dac_cal[DAC_CAL_PARAM_BYTES];
 
 /* ==================== Parameter Table ==================== */
 
@@ -153,21 +168,34 @@ static adc_param_block_t s_param_table[] =
          sizeof(s_param_gateway), sizeof(s_param_gateway)},
 
         // DAC 参数块
-        {ADC_PARAM_BLOCK_DA_CH1, s_param_da_ch1,
-         sizeof(s_param_da_ch1), sizeof(s_param_da_ch1)},
+        {ADC_PARAM_BLOCK_DA_CH1,
+         s_param_da_ch1,
+         DAC_OUTPUT_MANUAL_BYTES,
+         DAC_OUTPUT_PARAM_MAX_BYTES},
 
-        {ADC_PARAM_BLOCK_DA_CH2, s_param_da_ch2,
-         sizeof(s_param_da_ch2), sizeof(s_param_da_ch2)},
+        {ADC_PARAM_BLOCK_DA_CH2,
+         s_param_da_ch2,
+         DAC_OUTPUT_MANUAL_BYTES,
+         DAC_OUTPUT_PARAM_MAX_BYTES},
 
-        {ADC_PARAM_BLOCK_DA_CH3, s_param_da_ch3,
-         sizeof(s_param_da_ch3), sizeof(s_param_da_ch3)},
+        {ADC_PARAM_BLOCK_DA_CH3,
+         s_param_da_ch3,
+         DAC_OUTPUT_MANUAL_BYTES,
+         DAC_OUTPUT_PARAM_MAX_BYTES},
 
-        {ADC_PARAM_BLOCK_DA_CH4, s_param_da_ch4,
-         sizeof(s_param_da_ch4), sizeof(s_param_da_ch4)},
+        {ADC_PARAM_BLOCK_DA_CH4,
+         s_param_da_ch4,
+         DAC_OUTPUT_MANUAL_BYTES,
+         DAC_OUTPUT_PARAM_MAX_BYTES},
 
         // 设备名块（与 device_config.name 同步，可读可写）
         {ADC_PARAM_BLOCK_DEVICE_NAME, s_param_name,
          sizeof(s_param_name), sizeof(s_param_name)},
+
+        {ADC_PARAM_BLOCK_DAC_CAL,
+         s_param_dac_cal,
+         DAC_CAL_PARAM_BYTES,
+         DAC_CAL_PARAM_BYTES},
 };
 
 /* ==================== Network Configuration Dirty Flag ==================== */
@@ -227,39 +255,44 @@ adc_param_block_t *adc_param_store_find_block(uint16_t block_id)
  *
  * @note 格式：[mode(1)] [voltage(4)] [adc_ch(1)] [k(4)] [b(4)]
  */
-static void adc_param_store_sync_dac_param_block(uint8_t *buf,
-                                                 const device_dac_channel_config_t
-                                                     *dac_ch_config)
+static uint16_t adc_param_store_sync_dac_output_block(uint8_t *buf,
+                                                      const device_dac_output_channel_t
+                                                          *dac_output_ch)
 {
     uint16_t index;
 
-    if ((NULL == buf) || (NULL == dac_ch_config))
+    if ((NULL == buf) || (NULL == dac_output_ch))
     {
-        return;
+        return 0U;
     }
 
+    memset(buf, 0, DAC_OUTPUT_PARAM_MAX_BYTES);
+
     index = 0U;
+    buf[index++] = dac_output_ch->mode;
 
-    // ① 工作模式（1 字节）
-    buf[index++] = dac_ch_config->mode;
+    if (DEVICE_CONFIG_DAC_MODE_MANUAL == dac_output_ch->mode)
+    {
+        adc_proto_put_float_be(buf,
+                               &index,
+                               dac_output_ch->manual_voltage);
+    }
+    else if (DEVICE_CONFIG_DAC_MODE_ADC_CASCADE == dac_output_ch->mode)
+    {
+        buf[index++] = dac_output_ch->adc_channel;
+        adc_proto_put_float_be(buf,
+                               &index,
+                               dac_output_ch->cascade_k);
+        adc_proto_put_float_be(buf,
+                               &index,
+                               dac_output_ch->cascade_b);
+    }
+    else
+    {
+        return 0U;
+    }
 
-    // ② 手动输出电压（4 字节，浮点数）
-    adc_proto_put_float_be(buf,
-                           &index,
-                           dac_ch_config->manual_voltage);
-
-    // ③ ADC 级联通道号（1 字节）
-    buf[index++] = dac_ch_config->adc_channel;
-
-    // ④ 校准参数 k（4 字节，大端序）
-    adc_proto_put_float_be(buf,
-                           &index,
-                           dac_ch_config->k);
-
-    // ⑤ 校准参数 b（4 字节，大端序）
-    adc_proto_put_float_be(buf,
-                           &index,
-                           dac_ch_config->b);
+    return index;
 }
 
 /**
@@ -276,7 +309,8 @@ void adc_param_store_sync_from_config(void)
 {
     const device_network_config_t *network_config;
     const device_adc_cal_config_t *adc_cal_config;
-    const device_dac_config_t *dac_config;
+    const device_dac_output_config_t *dac_output;
+    const device_dac_cal_config_t *dac_cal_config;
 
     uint16_t index;
     uint8_t ch;
@@ -284,7 +318,8 @@ void adc_param_store_sync_from_config(void)
     // ① 获取各模块的配置
     network_config = device_config_get_network();
     adc_cal_config = device_config_get_adc_calibration();
-    dac_config = device_config_get_dac_config();
+    dac_output = device_config_get_dac_output();
+    dac_cal_config = device_config_get_dac_calibration();
 
     // ② 同步网络配置
     memcpy(s_param_ip_addr, network_config->ip, sizeof(network_config->ip));
@@ -313,14 +348,26 @@ void adc_param_store_sync_from_config(void)
     }
 
     // ④ 同步 DAC 参数
-    adc_param_store_sync_dac_param_block(s_param_da_ch1,
-                                         &dac_config->ch[0]);
-    adc_param_store_sync_dac_param_block(s_param_da_ch2,
-                                         &dac_config->ch[1]);
-    adc_param_store_sync_dac_param_block(s_param_da_ch3,
-                                         &dac_config->ch[2]);
-    adc_param_store_sync_dac_param_block(s_param_da_ch4,
-                                         &dac_config->ch[3]);
+    s_param_table[8].len = adc_param_store_sync_dac_output_block(s_param_da_ch1,
+                                                                 &dac_output->ch[0]);
+    s_param_table[9].len = adc_param_store_sync_dac_output_block(s_param_da_ch2,
+                                                                 &dac_output->ch[1]);
+    s_param_table[10].len = adc_param_store_sync_dac_output_block(s_param_da_ch3,
+                                                                  &dac_output->ch[2]);
+    s_param_table[11].len = adc_param_store_sync_dac_output_block(s_param_da_ch4,
+                                                                  &dac_output->ch[3]);
+
+    // ⑤ 同步 DAC 标定参数
+    index = 0U;
+    for (ch = 0U; ch < DEVICE_CONFIG_DAC_CHANNEL_COUNT; ch++)
+    {
+        adc_proto_put_float_be(s_param_dac_cal,
+                               &index,
+                               dac_cal_config->ch[ch].k);
+        adc_proto_put_float_be(s_param_dac_cal,
+                               &index,
+                               dac_cal_config->ch[ch].b);
+    }
 }
 
 /* ==================== Parameter Write Validation ==================== */
@@ -346,13 +393,24 @@ uint8_t adc_param_store_check_write_len(uint16_t block_id,
                    : ADC_PROTO_WRITE_STATUS_BAD_LEN;
     }
 
-    // ② DAC 参数（4 个通道）必须是 14 字节
+    if (ADC_PARAM_BLOCK_DAC_CAL == block_id)
+    {
+        return (DAC_CAL_PARAM_BYTES == len)
+                   ? ADC_PROTO_WRITE_STATUS_OK
+                   : ADC_PROTO_WRITE_STATUS_BAD_LEN;
+    }
+
+    // ② DAC 输出控制：手动 5 字节，级联 10 字节
     if ((ADC_PARAM_BLOCK_DA_CH1 <= block_id) &&
         (ADC_PARAM_BLOCK_DA_CH4 >= block_id))
     {
-        return (DAC_PARAM_BYTES == len)
-                   ? ADC_PROTO_WRITE_STATUS_OK
-                   : ADC_PROTO_WRITE_STATUS_BAD_LEN;
+        if ((DAC_OUTPUT_MANUAL_BYTES == len) ||
+            (DAC_OUTPUT_CASCADE_BYTES == len))
+        {
+            return ADC_PROTO_WRITE_STATUS_OK;
+        }
+
+        return ADC_PROTO_WRITE_STATUS_BAD_LEN;
     }
 
     // ③ 网络配置参数大小检查
@@ -630,35 +688,82 @@ uint8_t adc_param_store_apply_cal_param(const uint8_t *data,
 /* ==================== DAC Parameter Application ==================== */
 
 /**
- * @brief 应用 DAC 参数
- * @details 将新的 DAC 通道参数写入 device_config 并保存到 EEPROM
+ * @brief 应用 DAC 标定参数
+ * @details 将 4 路 DAC 的 k/b 标定参数写入 device_config，并请求 EEPROM 延迟保存
+ *
+ * @param[in] data: DAC 标定参数数据（32 字节，4 通道 × 2 参数 × 4 字节）
+ * @param[in] len:  参数长度
+ * @retval uint8_t
+ *         ADC_PROTO_WRITE_STATUS_SAVE_PENDING = 应用成功，保存待处理
+ *         ADC_PROTO_WRITE_STATUS_BAD_LEN      = 参数长度不合法
+ *
+ * @note 数据格式：
+ *       [DA1_k(4)] [DA1_b(4)]
+ *       [DA2_k(4)] [DA2_b(4)]
+ *       [DA3_k(4)] [DA3_b(4)]
+ *       [DA4_k(4)] [DA4_b(4)]
+ *       所有字段均为 float32_be。
+ */
+uint8_t adc_param_store_apply_dac_cal_param(const uint8_t *data,
+                                            uint16_t len)
+{
+    device_dac_cal_config_t next_dac_cal_config;
+    uint16_t index;
+    uint8_t ch;
+
+    if ((NULL == data) || (DAC_CAL_PARAM_BYTES != len))
+    {
+        return ADC_PROTO_WRITE_STATUS_BAD_LEN;
+    }
+
+    index = 0U;
+
+    for (ch = 0U; ch < DEVICE_CONFIG_DAC_CHANNEL_COUNT; ch++)
+    {
+        next_dac_cal_config.ch[ch].k = adc_proto_get_float_be(data, &index);
+        next_dac_cal_config.ch[ch].b = adc_proto_get_float_be(data, &index);
+    }
+
+    device_config_set_dac_calibration(&next_dac_cal_config);
+
+    adc_param_store_sync_from_config();
+
+    device_config_request_save();
+
+    SEGGER_RTT_WriteString(0, "dac cal save pending\r\n");
+    return ADC_PROTO_WRITE_STATUS_SAVE_PENDING;
+}
+
+/**
+ * @brief 应用 DAC 输出控制参数
+ * @details 修改某个 DAC 通道的当前输出运行状态，不写 EEPROM
  *
  * @param[in] block_id: 参数块 ID（ADC_PARAM_BLOCK_DA_CH1~DA_CH4 之一）
- * @param[in] data:     DAC 参数数据（14 字节）
+ * @param[in] data:     DAC 输出控制数据
  * @param[in] len:      参数长度
  * @retval uint8_t
- *         ADC_PROTO_WRITE_STATUS_OK            = 应用成功并已保存
- *         ADC_PROTO_WRITE_STATUS_SAVE_PENDING  = 应用成功但保存待处理
- *         ADC_PROTO_WRITE_STATUS_BAD_LEN       = 参数长度不合法
- *         ADC_PROTO_WRITE_STATUS_NOT_FOUND     = 参数块 ID 无效
+ *         ADC_PROTO_WRITE_STATUS_OK        = 应用成功
+ *         ADC_PROTO_WRITE_STATUS_BAD_LEN   = 参数长度不合法
+ *         ADC_PROTO_WRITE_STATUS_NOT_FOUND = 参数块 ID 无效
  *
- * @note DAC 参数格式：
- *       [mode(1)] [voltage(4)] [adc_ch(1)] [k(4)] [b(4)]
+ * @note 手动模式格式：
+ *       [mode(1)] [manual_voltage(4)]
  *
- *       其中 mode 可以是：
- *       - DEVICE_CONFIG_DAC_MODE_MANUAL      = 手动输出模式
- *       - DEVICE_CONFIG_DAC_MODE_ADC_CASCADE = ADC 级联模式
+ *       级联模式格式：
+ *       [mode(1)] [adc_ch(1)] [cascade_k(4)] [cascade_b(4)]
  */
 uint8_t adc_param_store_apply_dac_param(uint16_t block_id,
                                         const uint8_t *data,
                                         uint16_t len)
 {
-    device_dac_config_t next_dac_config;
+    device_dac_output_config_t next_dac_output;
     uint16_t index;
     uint8_t dac_ch;
 
     // ① 验证输入参数
-    if ((NULL == data) || (DAC_PARAM_BYTES != len))
+    if ((NULL == data) ||
+        ((DAC_OUTPUT_MANUAL_BYTES != len) &&
+         (DAC_OUTPUT_CASCADE_BYTES != len)))
     {
         return ADC_PROTO_WRITE_STATUS_BAD_LEN;
     }
@@ -674,48 +779,63 @@ uint8_t adc_param_store_apply_dac_param(uint16_t block_id,
     dac_ch = (uint8_t)(block_id - ADC_PARAM_BLOCK_DA_CH1);
 
     // ④ 复制当前 DAC 配置
-    memcpy(&next_dac_config,
-           device_config_get_dac_config(),
-           sizeof(next_dac_config));
+    memcpy(&next_dac_output,
+           device_config_get_dac_output(),
+           sizeof(next_dac_output));
 
     index = 0U;
 
     // ⑤ 解析 DAC 参数
-    next_dac_config.ch[dac_ch].mode = data[index++]; // 工作模式
+    // ⑤ 解析 DAC 输出控制参数
+    next_dac_output.ch[dac_ch].mode = data[index++];
 
-    next_dac_config.ch[dac_ch].manual_voltage = adc_proto_get_float_be(data, &index); // 输出电压
+    if (DEVICE_CONFIG_DAC_MODE_MANUAL == next_dac_output.ch[dac_ch].mode)
+    {
+        if (DAC_OUTPUT_MANUAL_BYTES != len)
+        {
+            return ADC_PROTO_WRITE_STATUS_BAD_LEN;
+        }
 
-    next_dac_config.ch[dac_ch].adc_channel = data[index++]; // ADC 级联通道
+        next_dac_output.ch[dac_ch].manual_voltage = adc_proto_get_float_be(data, &index);
+        next_dac_output.ch[dac_ch].adc_channel = DEVICE_CONFIG_DAC_ADC_CH_INVALID;
+    }
+    else if (DEVICE_CONFIG_DAC_MODE_ADC_CASCADE == next_dac_output.ch[dac_ch].mode)
+    {
+        if (DAC_OUTPUT_CASCADE_BYTES != len)
+        {
+            return ADC_PROTO_WRITE_STATUS_BAD_LEN;
+        }
 
-    next_dac_config.ch[dac_ch].k = adc_proto_get_float_be(data, &index); // 校准参数 k
-
-    next_dac_config.ch[dac_ch].b = adc_proto_get_float_be(data, &index); // 校准参数 b
+        next_dac_output.ch[dac_ch].adc_channel = data[index++];
+        next_dac_output.ch[dac_ch].cascade_k = adc_proto_get_float_be(data, &index);
+        next_dac_output.ch[dac_ch].cascade_b = adc_proto_get_float_be(data, &index);
+    }
+    else
+    {
+        return ADC_PROTO_WRITE_STATUS_BAD_LEN;
+    }
 
     // ⑥ 参数合法性检查
     // 检查工作模式
-    if (next_dac_config.ch[dac_ch].mode > DEVICE_CONFIG_DAC_MODE_ADC_CASCADE)
+    if (next_dac_output.ch[dac_ch].mode > DEVICE_CONFIG_DAC_MODE_ADC_CASCADE)
     {
         return ADC_PROTO_WRITE_STATUS_BAD_LEN;
     }
 
     // 检查 ADC 级联模式中的 ADC 通道号
-    if ((DEVICE_CONFIG_DAC_MODE_ADC_CASCADE == next_dac_config.ch[dac_ch].mode) &&
-        (next_dac_config.ch[dac_ch].adc_channel >= DEVICE_CONFIG_ADC_CHANNEL_COUNT))
+    if ((DEVICE_CONFIG_DAC_MODE_ADC_CASCADE == next_dac_output.ch[dac_ch].mode) &&
+        (next_dac_output.ch[dac_ch].adc_channel >= DEVICE_CONFIG_ADC_CHANNEL_COUNT))
     {
         return ADC_PROTO_WRITE_STATUS_BAD_LEN;
     }
 
-    // ⑦ 更新 device_config
-    device_config_set_dac_config(&next_dac_config);
+    // ⑦ 更新 DAC 输出运行状态：只影响当前输出，不写 EEPROM
+    device_config_set_dac_output(&next_dac_output);
 
-    // ⑧ 同步参数表
+    // ⑧ 同步参数表，保证读 0x0009~0x000C 能读回当前运行状态
     adc_param_store_sync_from_config();
 
-    SEGGER_RTT_WriteString(0, "dac param applied\r\n");
+    SEGGER_RTT_WriteString(0, "dac output applied\r\n");
 
-    // ⑨ 请求延迟保存到 EEPROM（实际写入在主循环空闲点完成）
-    device_config_request_save();
-
-    SEGGER_RTT_WriteString(0, "dac param save pending\r\n");
-    return ADC_PROTO_WRITE_STATUS_SAVE_PENDING;
+    return ADC_PROTO_WRITE_STATUS_OK;
 }

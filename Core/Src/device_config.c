@@ -6,7 +6,7 @@
 
 #define DEVICE_CONFIG_EEPROM_ADDR 0x0000U
 #define DEVICE_CONFIG_MAGIC 0x41444346UL
-#define DEVICE_CONFIG_VERSION 4U
+#define DEVICE_CONFIG_VERSION 5U
 
 typedef struct
 {
@@ -15,13 +15,15 @@ typedef struct
     uint16_t length;
     device_network_config_t network;
     device_adc_cal_config_t adc_cal;
-    device_dac_config_t dac;
+    device_dac_output_config_t dac_output;
+    device_dac_cal_config_t dac_cal;
     uint32_t crc32;
 } device_config_record_t;
 
 static device_network_config_t s_network_config;
 static device_adc_cal_config_t s_adc_cal_config;
-static device_dac_config_t s_dac_config;
+static device_dac_output_config_t s_dac_output_config;
+static device_dac_cal_config_t s_dac_cal_config;
 
 static const device_network_config_t s_default_network_config =
     {
@@ -55,7 +57,8 @@ void device_config_init_defaults(void)
            sizeof(s_network_config));
 
     memset(&s_adc_cal_config, 0, sizeof(s_adc_cal_config));
-    memset(&s_dac_config, 0, sizeof(s_dac_config));
+    memset(&s_dac_output_config, 0, sizeof(s_dac_output_config));
+    memset(&s_dac_cal_config, 0, sizeof(s_dac_cal_config));
 
     for (ch = 0U; ch < DEVICE_CONFIG_ADC_CHANNEL_COUNT; ch++)
     {
@@ -65,11 +68,14 @@ void device_config_init_defaults(void)
 
     for (ch = 0U; ch < DEVICE_CONFIG_DAC_CHANNEL_COUNT; ch++)
     {
-        s_dac_config.ch[ch].mode = DEVICE_CONFIG_DAC_MODE_MANUAL;
-        s_dac_config.ch[ch].manual_voltage = 0.0f;
-        s_dac_config.ch[ch].adc_channel = DEVICE_CONFIG_DAC_ADC_CH_INVALID;
-        s_dac_config.ch[ch].k = s_default_dac_k;
-        s_dac_config.ch[ch].b = s_default_dac_b;
+        s_dac_output_config.ch[ch].mode = DEVICE_CONFIG_DAC_MODE_MANUAL;
+        s_dac_output_config.ch[ch].manual_voltage = 0.0f;
+        s_dac_output_config.ch[ch].adc_channel = DEVICE_CONFIG_DAC_ADC_CH_INVALID;
+        s_dac_output_config.ch[ch].cascade_k = s_default_dac_k;
+        s_dac_output_config.ch[ch].cascade_b = s_default_dac_b;
+
+        s_dac_cal_config.ch[ch].k = s_default_dac_k;
+        s_dac_cal_config.ch[ch].b = s_default_dac_b;
     }
 }
 
@@ -103,19 +109,34 @@ void device_config_set_adc_calibration(const device_adc_cal_config_t *adc_cal_co
     memcpy(&s_adc_cal_config, adc_cal_config, sizeof(s_adc_cal_config));
 }
 
-const device_dac_config_t *device_config_get_dac_config(void)
+const device_dac_output_config_t *device_config_get_dac_output(void)
 {
-    return &s_dac_config;
+    return &s_dac_output_config;
 }
 
-void device_config_set_dac_config(const device_dac_config_t *dac_config)
+void device_config_set_dac_output(const device_dac_output_config_t *dac_output)
 {
-    if (NULL == dac_config)
+    if (NULL == dac_output)
     {
         return;
     }
 
-    memcpy(&s_dac_config, dac_config, sizeof(s_dac_config));
+    memcpy(&s_dac_output_config, dac_output, sizeof(s_dac_output_config));
+}
+
+const device_dac_cal_config_t *device_config_get_dac_calibration(void)
+{
+    return &s_dac_cal_config;
+}
+
+void device_config_set_dac_calibration(const device_dac_cal_config_t *dac_cal_config)
+{
+    if (NULL == dac_cal_config)
+    {
+        return;
+    }
+
+    memcpy(&s_dac_cal_config, dac_cal_config, sizeof(s_dac_cal_config));
 }
 
 HAL_StatusTypeDef device_config_save_all(void)
@@ -134,11 +155,13 @@ HAL_StatusTypeDef device_config_save_all(void)
     record.version = DEVICE_CONFIG_VERSION;
     record.length = (uint16_t)(sizeof(record.network) +
                                sizeof(record.adc_cal) +
-                               sizeof(record.dac));
+                               sizeof(record.dac_output) +
+                               sizeof(record.dac_cal));
 
     memcpy(&record.network, &s_network_config, sizeof(record.network));
     memcpy(&record.adc_cal, &s_adc_cal_config, sizeof(record.adc_cal));
-    memcpy(&record.dac, &s_dac_config, sizeof(record.dac));
+    memcpy(&record.dac_output, &s_dac_output_config, sizeof(record.dac_output));
+    memcpy(&record.dac_cal, &s_dac_cal_config, sizeof(record.dac_cal));
 
     crc_len = (uint16_t)(sizeof(record) - sizeof(record.crc32));
     record.crc32 = device_config_crc32((const uint8_t *)&record, crc_len);
@@ -263,7 +286,8 @@ HAL_StatusTypeDef device_config_load_all(void)
 
     if ((uint16_t)(sizeof(record.network) +
                    sizeof(record.adc_cal) +
-                   sizeof(record.dac)) != record.length)
+                   sizeof(record.dac_output) +
+                   sizeof(record.dac_cal)) != record.length)
     {
         return HAL_ERROR;
     }
@@ -278,7 +302,8 @@ HAL_StatusTypeDef device_config_load_all(void)
 
     memcpy(&s_network_config, &record.network, sizeof(s_network_config));
     memcpy(&s_adc_cal_config, &record.adc_cal, sizeof(s_adc_cal_config));
-    memcpy(&s_dac_config, &record.dac, sizeof(s_dac_config));
+    memcpy(&s_dac_output_config, &record.dac_output, sizeof(s_dac_output_config));
+    memcpy(&s_dac_cal_config, &record.dac_cal, sizeof(s_dac_cal_config));
 
     return HAL_OK;
 }

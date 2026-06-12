@@ -1291,13 +1291,21 @@ static void adc_tcp_server_handle_write_param(struct tcp_pcb *tpcb,
     if (ADC_PARAM_BLOCK_CONTROL == block_id)
     {
         // 控制参数：启停 ADC 数据流
-        adc_tcp_server_apply_control_param(block->data, block->len);
+        adc_tcp_server_apply_control_param(block->data,
+                                           block->len);
         write_status = ADC_PROTO_WRITE_STATUS_OK;
     }
     else if (ADC_PARAM_BLOCK_CAL_DATA == block_id)
     {
         // ADC 校准参数
-        write_status = adc_param_store_apply_cal_param(block->data, block->len);
+        write_status = adc_param_store_apply_cal_param(block->data,
+                                                       block->len);
+    }
+    else if (ADC_PARAM_BLOCK_DAC_CAL == block_id)
+    {
+        // DAC 标定参数：更新 EEPROM 中的 k_da/b_da
+        write_status = adc_param_store_apply_dac_cal_param(block->data,
+                                                           block->len);
     }
     else if ((ADC_PARAM_BLOCK_DA_CH1 <= block_id) &&
              (ADC_PARAM_BLOCK_DA_CH4 >= block_id))
